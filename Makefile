@@ -5,7 +5,7 @@ CFLAGS=-g -O0 -Wall #-fPIC
 INCLUDES=-I$(HDF5_DIR)/include -I$(ROOTLESS_DIR)
 LIBS=-L$(HDF5_DIR)/lib -L$(ROOTLESS_DIR) -lrlo -lhdf5 -lz
 SRC= H5VL_rlo.c VotingManager.c VotingPlugin_RLO.c LedgerManager.c ExecutionManager.c metadata_update_helper.c proposal.c util_queue.c
-RLO_VOL_PATH=$YOUR_OWN_RLO_VOL_DIR
+RLO_VOL_PATH=./# or $(YOUR_OWN_RLO_VOL_DIR)
 TARGET=libh5rlo.so #TARGET=libh5rlo.so
 BIN=testcase_rlo_vol
 
