@@ -38,6 +38,7 @@ typedef struct H5VL_rlo_pass_through_info_t {
     MPI_Comm mpi_comm;
     MPI_Info mpi_info;
     int world_size;
+    int my_rank;
 } H5VL_rlo_pass_through_info_t;
 //this is initialized with the 2 env vars .
 /* Use herr_t

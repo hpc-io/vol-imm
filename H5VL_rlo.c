@@ -67,70 +67,68 @@
 /*************************/
 /* Globals for debugging */
 /*************************/
-int MY_RANK_DEBUG;
-int WORLD_SIZE_DEBUG;
+extern int MY_RANK_DEBUG;
 
 /************/
 /* Typedefs */
 /************/
 
-typedef struct metadata_helper_VOL{
-    metadata_manager* mm;
-    unsigned int ref_cnt;
-
-}VOL_MetadataHelper;
-
-//for parent object type
+// For parent object type
 typedef enum {
     VL_FILE, VL_GROUP,
-    VL_DATASET, VL_ATTRIBUTES, VL_NAMED_DATATYPE, VL_OBJECT,
+    VL_DATASET, VL_ATTRIBUTES, VL_NAMED_DATATYPE,
     VL_INVALID
 } rlo_obj_type_t;
 
+// Types of operations on the container
 typedef enum {
+    FILE_CLOSE,
     DS_CREATE, DS_OPEN, DS_EXTEND, DS_CLOSE,
     GROUP_CREATE, GROUP_OPEN, GROUP_CLOSE,
-    ATTR_CREATE, ATTR_WRITE
-}VL_op_type;
+    ATTR_CREATE, ATTR_WRITE,
+    DT_COMMIT
+} VL_op_type;
+
+// "Proposal execution context" for operations on a file
+typedef struct prop_ctx {
+    /* # of objects sharing this context */
+    unsigned int ref_count;
+
+    /* Constant, set at file open / create */
+    void *under_file;           // "Under object" for the file, after RLO connector has opened it
+    hid_t under_vol_id;         // Local, same per file
+    int comm_size;              // # of ranks in file's communicator
+    int my_rank;                // My rank in file's communicator
+    metadata_manager *mm;       // Metadata manager for the file
+
+    /* File closing information */
+    unsigned close_count;       // # of file close operations seen, from all ranks
+    hbool_t is_collective;
+    void* under_obj;    //already opened obj
+    /* OUT, set in execution callback and retrieved in VOL callback */
+    void *resulting_obj_out;    //set with cb_exe results
+} prop_ctx;
 
 /* The pass through VOL info object */
 typedef struct H5VL_rlo_pass_through_t {//envelop A
+    /* Specific information for a particular object */
     rlo_obj_type_t obj_type;                /* Type of object */
-    hid_t  under_vol_id;        /* ID for underlying VOL connector */
-    //B's vol_id
     void   *under_object;       /* Info object for underlying VOL connector */
-    // B's envelop
-    VOL_MetadataHelper* metadata_helper; //pointer shared among all layers, one per process.
+                                // ("B's envelope")
 
-    //private for this file only, dupped from pass_through_info.comm/info
-//    MPI_Comm mpi_comm;
-//    MPI_Info mpi_info;
-} H5VL_rlo_pass_through_t; // per file container.
+    /* Shared information, for all objects */
+    prop_ctx *p_ctx;            // Pointer to shared context info */
+} H5VL_rlo_pass_through_t;
 
 /* The pass through VOL wrapper context */
 typedef struct H5VL_rlo_pass_through_wrap_ctx_t {//A's manual
-    VOL_MetadataHelper* metadata_helper;
-    hid_t under_vol_id;         /* VOL ID for under VOL */
-    //B's vol_id
+    /* For this VOL connector */
+    prop_ctx *p_ctx;            // Shared context for operations on a file
+
+    /* From underlying VOL connector */
     void *under_wrap_ctx;       /* Object wrapping context for under VOL */
-    //B's manual
+                                // ("B's manual")
 } H5VL_rlo_pass_through_wrap_ctx_t;
-
-typedef struct prop_ctx{
-    /* IN */
-    void *file_under_object;    // under object for the file, after RLO connector has opened it
-    VOL_MetadataHelper *file_mm;  // local, same per file
-    hid_t under_vol_id;         //local, same per file
-
-    /* OUT */
-    void* resulting_obj_out;    //set with cb_exe results
-}prop_ctx;
-
-//typedef struct H5VOL_CTX_RLO{
-//    H5VL_rlo_pass_through_t* file;
-//}H5VL_rlo_ctx;
-
-VOL_MetadataHelper* metadata_helper_init(H5VL_rlo_pass_through_info_t* info_in, prop_ctx* h5_ctx);
 
 
 /********************* */
@@ -146,7 +144,7 @@ static herr_t H5VL_rlo_pass_through_link_create_reissue(H5VL_link_create_type_t 
     void *obj, const H5VL_loc_params_t *loc_params, hid_t connector_id,
     hid_t lcpl_id, hid_t lapl_id, hid_t dxpl_id, void **req, ...);
 static H5VL_rlo_pass_through_t *H5VL_rlo_pass_through_new_obj(void *under_obj, rlo_obj_type_t obj_type,
-    hid_t under_vol_id, VOL_MetadataHelper* mm);
+    prop_ctx *p_ctx);
 static herr_t H5VL_rlo_pass_through_free_obj(H5VL_rlo_pass_through_t *obj);
 
 /* "Management" callbacks */
@@ -369,6 +367,22 @@ typedef struct proposal_param_ds_create{
 
 }param_ds_create;
 
+typedef struct proposal_dt_commit_param{
+    hid_t type_id;
+    hid_t lcpl_id;
+    hid_t tcpl_id;
+    hid_t tapl_id;
+    hid_t dxpl_id;
+
+    rlo_obj_type_t parent_type;
+    haddr_t parent_obj_addr;
+
+    size_t loc_param_size;
+    H5VL_loc_params_t *loc_params;
+    size_t name_size;
+    char *name;
+}param_dt_commit;
+
 typedef struct proposal_param_ds_extend {
     haddr_t dset_addr;
     int rank;
@@ -421,6 +435,9 @@ typedef struct proposal_param_attr_write{
 
 }param_attr_wr;
 
+static metadata_manager *metadata_helper_init(const H5VL_rlo_pass_through_info_t *info_in,
+    prop_ctx *h5_ctx);
+
 void* t_encode(hid_t type_id, size_t* size);
 void* p_encode(hid_t pl_id, size_t* size);
 void* s_encode(hid_t space_id, size_t* size);
@@ -444,6 +461,168 @@ int attr_param_close(param_attr* param){return 0;}
 
 int attr_write_encoder(param_attr_wr* param_in, void** proposal_data_out);
 int attr_write_decoder(void* proposal_data_in, param_attr_wr* param_out);
+//typedef struct proposal_dt_commit_param{
+//    hid_t type_id;
+//    hid_t lcpl_id;
+//    hid_t tcpl_id;
+//    hid_t tapl_id;
+//    hid_t dxpl_id;
+//    size_t loc_size;
+//    H5VL_loc_params_t *loc_params;
+//    size_t name_size;
+//    char *name;
+//}param_dt_commit;
+
+size_t dt_commit_encoder(param_dt_commit* param_in, void** proposal_data_out);
+int dt_commit_decoder(void* proposal_data_in, param_dt_commit* param_out);
+
+size_t dt_commit_encoder(param_dt_commit* param_in, void** proposal_data_out){
+    size_t total_size = 0;
+    assert(param_in && param_in->loc_params);
+
+    void* param_pack = NULL;
+    size_t loc_param_size = loc_params_encoder(param_in->loc_params, &param_pack);
+
+    param_in->loc_param_size = loc_param_size;
+
+    size_t type_id_size;
+    void* tid_buf = t_encode(param_in->type_id, &type_id_size);
+
+    size_t lcpl_size;
+    void* lcpl_buf = p_encode(param_in->lcpl_id, &lcpl_size);
+
+    size_t tcpl_size;
+    void* tcpl_buf = p_encode(param_in->tcpl_id, &tcpl_size);
+
+    size_t tapl_size;
+    void* tapl_buf = p_encode(param_in->tapl_id, &tapl_size);
+
+    size_t dxpl_size;
+    void* dxpl_buf = p_encode(param_in->dxpl_id, &dxpl_size);
+
+    total_size =
+            sizeof(size_t) + type_id_size +
+            sizeof(size_t) + lcpl_size +
+            sizeof(size_t) + tcpl_size +
+            sizeof(size_t) + tapl_size +
+            sizeof(size_t) + dxpl_size +
+            sizeof(rlo_obj_type_t) +    //parent_type
+            sizeof(haddr_t) +           //parent_addr
+            sizeof(size_t) + loc_param_size +
+            sizeof(size_t) + param_in->name_size;
+
+    if(!(*proposal_data_out)){
+        //DEBUG_PRINT
+        *proposal_data_out = calloc(1, total_size);
+    }
+
+    void* cur = *proposal_data_out;
+
+    *(size_t*) cur = type_id_size;
+    cur = (char*)cur + sizeof(size_t);
+    memcpy(cur, tid_buf, type_id_size);
+    cur = (char*)cur + type_id_size;
+    free(tid_buf);
+
+    *(size_t*) cur = lcpl_size;
+    cur = (char*)cur + sizeof(size_t);
+    memcpy(cur, lcpl_buf, lcpl_size);
+    cur = (char*)cur + lcpl_size;
+    free(lcpl_buf);
+
+    *(size_t*)cur = tcpl_size;
+    cur = (char*)cur + sizeof(size_t);
+    memcpy(cur, tcpl_buf, tcpl_size);
+    cur = (char*)cur + tcpl_size;
+    free(tcpl_buf);
+
+    *(size_t*)cur = tapl_size;
+    cur = (char*)cur + sizeof(size_t);
+    memcpy(cur, tapl_buf, tapl_size);
+    cur = (char*)cur + tapl_size;
+    free(tapl_buf);
+
+    *(size_t*)cur = dxpl_size;
+    cur = (char*)cur + sizeof(size_t);
+    memcpy(cur, dxpl_buf, dxpl_size);
+    cur = (char*)cur + dxpl_size;
+    free(dxpl_buf);
+
+    *(rlo_obj_type_t*)cur = param_in->parent_type;
+    cur = (char*)cur + sizeof(rlo_obj_type_t);
+
+    *(haddr_t*)cur = param_in->parent_obj_addr;
+    cur = (char*)cur + sizeof(haddr_t);
+
+    *(size_t*)cur = param_in->name_size;
+    cur = (char*)cur + sizeof(size_t);
+    memcpy(cur, param_in->name, param_in->name_size);
+    cur = (char*)cur + param_in->name_size;
+
+    *(size_t*)cur = param_in->loc_param_size;
+    cur = (char*)cur + sizeof(size_t);
+    memcpy(cur, param_pack, param_in->loc_param_size);
+
+    return total_size;
+}
+
+int dt_commit_decoder(void* proposal_data_in, param_dt_commit* param_out){
+    DEBUG_PRINT
+    if(!param_out)
+        param_out = calloc(1, sizeof(param_attr));
+
+    size_t type_id_size = *(size_t*)proposal_data_in;
+    proposal_data_in = (char*)proposal_data_in + sizeof(size_t);
+    param_out->type_id = H5Tdecode(proposal_data_in);
+    proposal_data_in = (char*)proposal_data_in + type_id_size;
+    //==========================================================
+
+    size_t lcpl_size = *(size_t*)proposal_data_in;
+    proposal_data_in = (char*)proposal_data_in + sizeof(size_t);
+    param_out->lcpl_id = H5Pdecode(proposal_data_in);
+    proposal_data_in = (char*)proposal_data_in + lcpl_size;
+
+    size_t tcpl_size = *(size_t*)proposal_data_in;
+    proposal_data_in = (char*)proposal_data_in + sizeof(size_t);
+    param_out->tcpl_id = H5Pdecode(proposal_data_in);
+    proposal_data_in = (char*)proposal_data_in + tcpl_size;
+
+    size_t tapl_size = *(size_t*)proposal_data_in;
+    proposal_data_in = (char*)proposal_data_in + sizeof(size_t);
+    param_out->tapl_id = H5Pdecode(proposal_data_in);
+    proposal_data_in = (char*)proposal_data_in + tapl_size;
+
+    size_t dxpl_size = *(size_t*)proposal_data_in;
+    proposal_data_in = (char*)proposal_data_in + sizeof(size_t);
+    param_out->dxpl_id = H5Pdecode(proposal_data_in);
+    proposal_data_in = (char*)proposal_data_in + dxpl_size;
+    //==========================================================
+
+    param_out->parent_type = *((rlo_obj_type_t*)proposal_data_in);
+    proposal_data_in = (char*)proposal_data_in + sizeof(rlo_obj_type_t);
+
+    param_out->parent_obj_addr = *((haddr_t*)proposal_data_in);
+    proposal_data_in = (char*)proposal_data_in + sizeof(haddr_t);
+    //==========================================================
+
+    param_out->name_size = *((size_t*)proposal_data_in);
+    proposal_data_in = (char*)proposal_data_in + sizeof(size_t);
+
+    param_out->name = calloc(1,  param_out->name_size);
+    memcpy(param_out->name , proposal_data_in, param_out->name_size);
+    proposal_data_in = (char*)proposal_data_in + param_out->name_size;
+
+    param_out->loc_param_size = *((size_t*)proposal_data_in);
+    proposal_data_in = (char*)proposal_data_in + sizeof(size_t);
+
+    void* param_pack = proposal_data_in;// + param_out->uobj_size;
+    H5VL_loc_params_t* loc_params = NULL;
+    loc_params_decoder(param_pack, &loc_params);
+
+    param_out->loc_params = loc_params;
+
+    return 1;
+}
 
 int attr_write_encoder(param_attr_wr* param_in, void** proposal_data_out){
     size_t type_id_size;
@@ -452,10 +631,13 @@ int attr_write_encoder(param_attr_wr* param_in, void** proposal_data_out){
     size_t dxpl_size;
     void* dxpl_buf = p_encode(param_in->dxpl_id, &dxpl_size);
 
-    size_t total_size = type_id_size + dxpl_size +
-            2 * sizeof(size_t) +
-            param_in->buf_size +
-            sizeof(size_t);
+    size_t total_size =
+            sizeof(size_t) + type_id_size +
+            sizeof(size_t) + dxpl_size +
+            sizeof(rlo_obj_type_t) +    //parent_type
+            sizeof(haddr_t) +           //parent_addr
+            sizeof(size_t) + param_in->attr_name_size + //name
+            sizeof(size_t) + param_in->buf_size;    //buf
 
     if(!(*proposal_data_out)){
         //DEBUG_PRINT
@@ -482,7 +664,7 @@ int attr_write_encoder(param_attr_wr* param_in, void** proposal_data_out){
     *(haddr_t*)cur = param_in->parent_obj_addr;
     cur = (char*)cur + sizeof(haddr_t);
 
-    param_in->attr_name_size = strlen(param_in->attr_name) + 1;
+    //param_in->attr_name_size = strlen(param_in->attr_name) + 1;
     *(size_t*)cur = param_in->attr_name_size;
     cur = (char*)cur + sizeof(size_t);
     memcpy(cur, param_in->attr_name, param_in->attr_name_size);
@@ -490,7 +672,10 @@ int attr_write_encoder(param_attr_wr* param_in, void** proposal_data_out){
 
     *(size_t*)cur = param_in->buf_size;
     cur = (char*)cur + sizeof(size_t);
-    memcpy(cur, param_in->buf, param_in->buf_size);
+    if(param_in->buf_size > 0){
+        memcpy(cur, param_in->buf, param_in->buf_size);
+    } else
+        cur = NULL;
 
     return total_size;
 }
@@ -529,7 +714,6 @@ int attr_write_decoder(void* proposal_data_in, param_attr_wr* param_out){
 
     return 0;
 }
-
 
 int attr_create_encoder(param_attr* param_in, void** proposal_data_out){
     assert(param_in && param_in->loc_params);
@@ -1065,6 +1249,21 @@ herr_t attr_get(void* obj, hid_t vol_id, H5VL_attr_get_t get_type,
     return 0;
 }
 
+char* attr_get_name(void* under_vol_obj, hid_t vol_id){
+    H5VL_loc_params_t   loc_params;
+    loc_params.type = H5VL_OBJECT_BY_SELF;
+    hid_t attr_id;
+
+    loc_params.obj_type = H5I_ATTR;
+
+    /* Get the attribute name */
+    size_t buf_size;
+    attr_get(under_vol_obj, vol_id, H5VL_ATTR_GET_NAME, H5P_DEFAULT, NULL, &loc_params, 0, NULL, &buf_size);
+    void* buf = calloc(1, buf_size + 1);
+    attr_get(under_vol_obj, vol_id, H5VL_ATTR_GET_NAME, H5P_DEFAULT, NULL, &loc_params, buf_size + 1, buf, &buf_size);
+    return (char*) buf;
+}
+
 herr_t ds_get(void* obj, hid_t vol_id, H5VL_dataset_get_t get_type,
     hid_t dxpl_id, void **req, ...)
 {
@@ -1083,11 +1282,13 @@ herr_t ds_specific(void* obj, hid_t vol_id, H5VL_dataset_specific_t specific_typ
 {
     va_list args;
     herr_t status;
-
+    DEBUG_PRINT
     va_start(args, req);
+    DEBUG_PRINT
     status = H5VLdataset_specific(obj, vol_id, specific_type, dxpl_id, req, args);
+    DEBUG_PRINT
     va_end(args);
-
+    DEBUG_PRINT
     return status;
 }
 
@@ -1108,13 +1309,16 @@ size_t ds_extend_encoder(void *obj, hid_t under_vol_id, hsize_t *new_size,
     assert(under_vol_id > 0);
     assert(new_size);
 
+    DEBUG_PRINT
     /* Retrieve the address for the underlying object */
     param_tmp.type = H5VL_OBJECT_BY_SELF;
     param_tmp.obj_type = H5I_DATASET;
     get_native_info(obj, under_vol_id, H5P_DEFAULT, NULL, H5VL_NATIVE_OBJECT_GET_INFO, &param_tmp, &oinfo, H5O_INFO_BASIC);
+    DEBUG_PRINT
 
     /* Retrieve the current dataspace for the dataset */
     status = ds_get(obj, under_vol_id, H5VL_DATASET_GET_SPACE, H5P_DEFAULT, NULL, &space_id);
+    DEBUG_PRINT
 
     /* Get the rank of the dataset (controls the # of dims) */
     ds_rank = H5Sget_simple_extent_ndims(space_id);
@@ -1122,6 +1326,7 @@ printf("%d:%s:%d: ds_rank = %d\n", MY_RANK_DEBUG, __func__, __LINE__, ds_rank);
 
     /* Close the dataspace */
     status = H5Sclose(space_id);
+    DEBUG_PRINT
 
     /* Compute the size of the buffer needed */
     data_size = sizeof(haddr_t) + sizeof(int) + (ds_rank * sizeof(hsize_t));
@@ -1392,7 +1597,7 @@ int h5_judgement(const void *proposal_buf, void *app_ctx) {
     proposal* proposal = proposal_decoder((void*)proposal_buf);
     //proposal_test(proposal);
 
-    if((MM_get_time_stamp_us() - proposal->time) >  ctx->file_mm->mm->time_window_size ){//received proposal is too old.
+    if((MM_get_time_stamp_us() - proposal->time) >  ctx->mm->time_window_size ){//received proposal is too old.
         printf("%s:%d: rank = %d, proposal too old, voted NO. pid = %d, pp_time = %lu \n",
                 __func__, __LINE__, MY_RANK_DEBUG, proposal->pid, proposal->time);
         return 0;
@@ -1401,11 +1606,19 @@ int h5_judgement(const void *proposal_buf, void *app_ctx) {
     return 1;
 }
 
+int _file_close_cb_sub(prop_ctx *execute_ctx, proposal *proposal)
+{
+    // Increment # of file close operations seen, from all ranks
+    execute_ctx->close_count++;
+    DEBUG_PRINT
+    return 0;
+}
+
 //ret_value = H5VLattr_write(o->under_object, o->under_vol_id, mem_type_id, buf, dxpl_id, req);
 int _attr_write_cb_sub(prop_ctx *execute_ctx, proposal* proposal) {
     param_attr_wr* param = calloc(1, sizeof(param_attr_wr));
     attr_write_decoder(proposal->proposal_data, param);
-    printf("%d:%s:%d: rank = %d, \n", getpid(), __func__, __LINE__, MY_RANK_DEBUG);
+    //printf("%d:%s:%d: rank = %d, \n", getpid(), __func__, __LINE__, MY_RANK_DEBUG);
 
     //search local under_object by obj_id
     void* under_object_local;
@@ -1416,7 +1629,7 @@ int _attr_write_cb_sub(prop_ctx *execute_ctx, proposal* proposal) {
     DEBUG_PRINT
 
     H5I_type_t opened_type = 0;
-    under_object_local = H5VLobject_open(execute_ctx->file_under_object, &under_loc_params,
+    under_object_local = H5VLobject_open(execute_ctx->under_file, &under_loc_params,
                     execute_ctx->under_vol_id,
                     &opened_type, //output: opened type
                     param->dxpl_id,
@@ -1455,7 +1668,7 @@ int _attr_write_cb_sub(prop_ctx *execute_ctx, proposal* proposal) {
 
     }
     DEBUG_PRINT
-    printf("attr_name = [%s]\n", param->attr_name);
+    //printf("attr_name = [%s]\n", param->attr_name);
     void* attr = H5VLattr_open(under_object_local, &loc_param_attr, execute_ctx->under_vol_id, param->attr_name, aapl_id, param->dxpl_id, NULL);
     assert(attr);
     //write attr
@@ -1500,6 +1713,69 @@ int _attr_write_cb_sub(prop_ctx *execute_ctx, proposal* proposal) {
     return 0;
 }
 
+int _dt_commit_cb_sub(prop_ctx *execute_ctx, proposal* proposal){
+    param_dt_commit* param = calloc(1, sizeof(param_dt_commit));
+    dt_commit_decoder(proposal->proposal_data, param);
+    DEBUG_PRINT
+    //search local under_object by obj_id
+    void* under_object_local;
+
+    if (param->parent_type == VL_GROUP) {
+        //DEBUG_PRINT
+        H5VL_loc_params_t under_loc_params;
+        under_loc_params.obj_type = H5I_FILE;//H5I_GROUP;
+        under_loc_params.type = H5VL_OBJECT_BY_ADDR;
+        under_loc_params.loc_data.loc_by_addr.addr = param->parent_obj_addr;
+        H5I_type_t opened_type = 0;
+        under_object_local = H5VLobject_open(execute_ctx->under_file, &under_loc_params,
+                execute_ctx->under_vol_id,
+                &opened_type, //output: opened type
+                param->dxpl_id,
+                NULL); //req
+    } else { //file
+        DEBUG_PRINT
+        //under_loc_params.obj_type =
+        under_object_local = execute_ctx->under_file;
+    }
+    assert(under_object_local);
+    DEBUG_PRINT
+    //printf("%s:%d: rank = %d, CHECKING ORDER: ds_name = %s, time = %lu\n", __func__, __LINE__,
+    //        MY_RANK_DEBUG, param->name, proposal->time);
+    void* under_dt_object = H5VLdatatype_commit(
+            under_object_local,
+            param->loc_params,
+            execute_ctx->under_vol_id,
+            param->name,
+            param->type_id,
+            param->lcpl_id,
+            param->tcpl_id,
+            param->tapl_id,
+            param->dxpl_id,
+            NULL);
+
+    DEBUG_PRINT
+    //printf("%s:%d: rank = %d,returning ds(name = %s) obj = %p\n",  __func__, __LINE__,
+    //        MY_RANK_DEBUG, param->name, under_dataset_object );
+    assert(under_dt_object);
+    if (proposal->isLocal) { // TODO: how to set local flag? Maybe not part of the proposa?  Maybe part of the callback parameters from the progress engine
+        DEBUG_PRINT
+        execute_ctx->resulting_obj_out = under_dt_object;
+    } else {
+        DEBUG_PRINT
+        H5VLdatatype_close(under_dt_object, execute_ctx->under_vol_id, param->dxpl_id, NULL);
+        DEBUG_PRINT
+    }
+    //DEBUG_PRINT
+
+    // Close the temporary obj of group (not file)
+    if (param->parent_type == VL_GROUP) {
+        H5VLgroup_close(under_object_local, execute_ctx->under_vol_id, param->dxpl_id, NULL);
+    }
+    free(param);
+    //DEBUG_PRINT
+    return 0;
+}
+
 int _attr_create_cb_sub(prop_ctx *execute_ctx, proposal* proposal) {
     param_attr* param = calloc(1, sizeof(param_attr));
     attr_create_decoder(proposal->proposal_data, param);
@@ -1515,7 +1791,7 @@ int _attr_create_cb_sub(prop_ctx *execute_ctx, proposal* proposal) {
     DEBUG_PRINT
 
     H5I_type_t opened_type = 0;
-    under_object_local = H5VLobject_open(execute_ctx->file_under_object, &under_loc_params,
+    under_object_local = H5VLobject_open(execute_ctx->under_file, &under_loc_params,
                     execute_ctx->under_vol_id,
                     &opened_type, //output: opened type
                     param->dxpl_id,
@@ -1593,7 +1869,7 @@ int _ds_create_cb_sub(prop_ctx *execute_ctx, proposal* proposal) {
         under_loc_params.type = H5VL_OBJECT_BY_ADDR;
         under_loc_params.loc_data.loc_by_addr.addr = param->parent_obj_addr;
         H5I_type_t opened_type = 0;
-        under_object_local = H5VLobject_open(execute_ctx->file_under_object, &under_loc_params,
+        under_object_local = H5VLobject_open(execute_ctx->under_file, &under_loc_params,
                 execute_ctx->under_vol_id,
                 &opened_type, //output: opened type
                 param->dxpl_id,
@@ -1601,7 +1877,7 @@ int _ds_create_cb_sub(prop_ctx *execute_ctx, proposal* proposal) {
     } else { //file
         DEBUG_PRINT
         //under_loc_params.obj_type =
-        under_object_local = execute_ctx->file_under_object; //TODO: need to set ctx for this at file open.
+        under_object_local = execute_ctx->under_file;
     }
     assert(under_object_local);
     DEBUG_PRINT
@@ -1642,8 +1918,6 @@ int _ds_extend_cb_sub(prop_ctx *execute_ctx, proposal* proposal)
 {
     param_ds_extend* param;
     void* under_object_local;
-    H5VL_loc_params_t under_loc_params;
-    H5I_type_t opened_type = 0;
     herr_t ret_value;
 
     param = calloc(1, sizeof(param_ds_extend));
@@ -1651,29 +1925,46 @@ int _ds_extend_cb_sub(prop_ctx *execute_ctx, proposal* proposal)
     ds_extend_decoder(proposal->proposal_data, param);
     DEBUG_PRINT
 
-    //search local under_object by obj_id
-    under_loc_params.obj_type = H5I_FILE;
-    under_loc_params.type = H5VL_OBJECT_BY_ADDR;
-    under_loc_params.loc_data.loc_by_addr.addr = param->dset_addr;;
-    under_object_local = H5VLobject_open(execute_ctx->file_under_object, &under_loc_params,
-            execute_ctx->under_vol_id,
-            &opened_type, //output: opened type
-            H5P_DEFAULT,
-            NULL); //req
-    assert(under_object_local);
-    //DEBUG_PRINT
-    printf("%d:%s:%d: rank = %d, CHECKING ORDER: ds_addr = %llu, time = %lu\n", getpid(), __func__, __LINE__,
-            MY_RANK_DEBUG, (unsigned long long)param->dset_addr, proposal->time);
+    if(!proposal->isLocal){
+        H5VL_loc_params_t under_loc_params;
+        H5I_type_t opened_type = 0;
 
+        /* Push a fresh HDF5 library state */
+        H5VLpush_lib_state();
+
+        under_loc_params.obj_type = H5I_FILE;
+        under_loc_params.type = H5VL_OBJECT_BY_ADDR;
+        under_loc_params.loc_data.loc_by_addr.addr = param->dset_addr;
+        under_object_local = H5VLobject_open(execute_ctx->under_file, &under_loc_params,
+                execute_ctx->under_vol_id,
+                &opened_type, //output: opened type
+                H5P_DEFAULT,
+                NULL); //req
+        assert(under_object_local);
+
+        /* Restore the previous HDF5 library state */
+        H5VLpop_lib_state();
+    }else{
+        under_object_local = execute_ctx->under_obj;
+    }
+
+    DEBUG_PRINT
+    //printf("%d:%s:%d: rank = %d, CHECKING ORDER: ds_addr = %llu, time = %lu, new_size[0] = %llu, new_size[1] = %llu\n", getpid(), __func__, __LINE__,
+    //        MY_RANK_DEBUG, (unsigned long long)param->dset_addr, proposal->time, param->new_size[0], param->new_size[1]);
+    DEBUG_PRINT
     ret_value = ds_specific(under_object_local, execute_ctx->under_vol_id, H5VL_DATASET_SET_EXTENT, H5P_DEFAULT, NULL, param->new_size);
     DEBUG_PRINT
 
     ds_extend_param_close(param);
-
+    DEBUG_PRINT
     // Close the temporary obj of dataset
-    H5VLdataset_close(under_object_local, execute_ctx->under_vol_id, H5P_DEFAULT, NULL);
-    //DEBUG_PRINT
-
+    if(!proposal->isLocal){
+        H5VLdataset_close(under_object_local, execute_ctx->under_vol_id, H5P_DEFAULT, NULL);
+    }
+    DEBUG_PRINT
+    if(proposal->isLocal){
+        return ret_value;
+    }
     return 0;
 }
 
@@ -1694,14 +1985,14 @@ int _group_create_cb_sub(prop_ctx* execute_ctx, proposal* proposal){
         under_loc_params.type = H5VL_OBJECT_BY_ADDR;
         under_loc_params.loc_data.loc_by_addr.addr = param->parent_obj_addr;
         H5I_type_t opened_type = 0;
-        under_object_local = H5VLobject_open(execute_ctx->file_under_object, &under_loc_params,
+        under_object_local = H5VLobject_open(execute_ctx->under_file, &under_loc_params,
                 execute_ctx->under_vol_id,
                 &opened_type, //output: opened type
                 param->dxpl_id,
                 NULL); //req
     } else { //file
         DEBUG_PRINT
-        under_object_local = execute_ctx->file_under_object; //TODO: need to set ctx for this at file open.
+        under_object_local = execute_ctx->under_file;
     }
     assert(under_object_local);
     DEBUG_PRINT
@@ -1736,7 +2027,12 @@ int cb_execute_H5VL_RLO( void* h5_ctx, void* proposal_buf)
     //DEBUG_PRINT
     //printf("%s:%d: test proposal_data len = %lu, pid = %d, op_type = %d, state = %d, time = %lu\n",
     //        __func__, __LINE__, proposal->p_data_len, proposal->pid, proposal->op_type, proposal->state, proposal->time);
-    switch(proposal->op_type){
+    switch(proposal->op_type) {
+        case FILE_CLOSE:
+            DEBUG_PRINT
+            _file_close_cb_sub(execute_ctx, proposal);
+            break;
+
         case DS_CREATE:
             DEBUG_PRINT
             _ds_create_cb_sub(execute_ctx, proposal);
@@ -1760,6 +2056,11 @@ int cb_execute_H5VL_RLO( void* h5_ctx, void* proposal_buf)
         case ATTR_WRITE:
             DEBUG_PRINT
             _attr_write_cb_sub(execute_ctx, proposal);
+            break;
+
+        case DT_COMMIT:
+            DEBUG_PRINT
+            _dt_commit_cb_sub(execute_ctx, proposal);
             break;
 
         default:
@@ -1812,6 +2113,144 @@ void* p_encode(hid_t pl_id, size_t* size){
 // ===========================================================================
 
 
+static metadata_manager *
+metadata_helper_init(const H5VL_rlo_pass_through_info_t *info_in,
+    prop_ctx *h5_app_ctx)
+{
+    metadata_manager *mm;       // Metadata manager for a file
+    VotingPlugin *vp;
+    vp_info_rlo *vp_info_in;
+    VP_ctx* vp_ctx_out;
+
+    mm = calloc(1, sizeof(metadata_manager));
+    vp = VM_voting_plugin_new();//empty for now.
+    vp_info_in = calloc(1, sizeof(vp_info_rlo));
+
+    MPI_Comm_dup(info_in->mpi_comm, &(vp_info_in->mpi_comm));
+    if(info_in->mpi_info != MPI_INFO_NULL)
+        MPI_Info_dup(info_in->mpi_info, &(vp_info_in->mpi_info));
+    else
+        vp_info_in->mpi_info = MPI_INFO_NULL;
+    MY_RANK_DEBUG = info_in->my_rank;
+    vp_ctx_out = calloc(1, sizeof(vp_ctx_out));
+
+    vp->vp_ctx_in = vp_info_in;
+    vp->vp_init = &vp_init_RLO;//vp_init_RLO(&h5_judgement, h5_app_ctx, vp_info_in, &(vp_ctx_out->eng));
+    vp->vp_make_progress = &vp_make_progress_RLO;
+    vp->vp_check_my_proposal_state = &vp_check_my_proposal_state_RLO;
+    vp->vp_checkout_proposal = &vp_checkout_proposal_RLO;
+    vp->vp_finalize = &vp_finalize_RLO;
+    vp->vp_rm_my_proposal = &vp_rm_my_proposal_RLO;
+    vp->vp_submit_proposal = &vp_submit_proposal_RLO;
+    vp->vp_submit_bcast = &vp_submit_bcast_RLO;
+
+    //printf("%s:%d:mode = %d, world_size = %d, window size =  %d\n", __func__, __LINE__, info_in->mode, info_in->world_size, info_in->time_window_size);
+    mm = MM_metadata_update_helper_init(info_in->mode, info_in->world_size,
+            info_in->time_window_size, &h5_judgement, h5_app_ctx, vp, &cb_execute_H5VL_RLO);
+
+    return mm;
+}
+
+
+/*-------------------------------------------------------------------------
+ * Function:    prop_ctx_new
+ *
+ * Purpose:     Allocate and initialize a prop_ctx object
+ *
+ * Note:        This passes the partially initialized prop_ctx to the
+ *              metadata manager, and then sets the metadata manager pointer
+ *              in the prop_ctx with the returned value.   So, anything that
+ *              the metadata manager needs to use in the prop_ctx must be
+ *              initialized prior to that call.
+ *
+ * Return:      Success:    Pointer to new prop_ctx
+ *              Failure:    NULL
+ *
+ * Programmer:  Quincey Koziol
+ *              Sunday, September 29, 2019
+ *
+ *-------------------------------------------------------------------------
+ */
+static prop_ctx *
+prop_ctx_new(void *under, const H5VL_rlo_pass_through_info_t *info, hbool_t is_collective)
+{
+    prop_ctx* h5_ctx;
+
+    h5_ctx = calloc(1, sizeof(prop_ctx));
+    h5_ctx->under_file = under;
+    h5_ctx->under_vol_id = info->under_vol_id;
+    h5_ctx->is_collective = is_collective;
+    H5Iinc_ref(h5_ctx->under_vol_id);
+    MPI_Comm_size(info->mpi_comm, &h5_ctx->comm_size);
+    MPI_Comm_rank(info->mpi_comm, &h5_ctx->my_rank);
+    h5_ctx->mm = metadata_helper_init(info, h5_ctx);
+
+    return h5_ctx;
+} /* end prop_ctx_new() */
+
+/*-------------------------------------------------------------------------
+ * Function:    prop_ctx_inc_rc
+ *
+ * Purpose:     Increment the refcount for a prop_ctx object
+ *
+ * Return:      Success:    0
+ *              Failure:    -1
+ *
+ * Programmer:  Quincey Koziol
+ *              Saturday, September 28, 2019
+ *
+ *-------------------------------------------------------------------------
+ */
+static int
+prop_ctx_inc_rc(prop_ctx *p_ctx)
+{
+    assert(p_ctx);
+
+    // Increment ref count
+    p_ctx->ref_count++;
+
+    return 0;
+} /* end prop_ctx_inc_rc() */
+
+/*-------------------------------------------------------------------------
+ * Function:    prop_ctx_dec_rc
+ *
+ * Purpose:     Decrement the refcount for a prop_ctx object, freeing it
+ *              when the refcount drops to zero
+ *
+ * Return:      Success:    0
+ *              Failure:    -1
+ *
+ * Programmer:  Quincey Koziol
+ *              Saturday, September 28, 2019
+ *
+ *-------------------------------------------------------------------------
+ */
+static int
+prop_ctx_dec_rc(prop_ctx *p_ctx)
+{
+    assert(p_ctx);
+
+    // Decrement refcount and free resources when it reaches 0
+    p_ctx->ref_count--;
+    if(0 == p_ctx->ref_count) {
+        hid_t err_id;
+
+        // Decrement count on underlying VOL connector
+        // (Ignore error return from H5Idec_ref and suppress HDF5 error stack, for now)
+        err_id = H5Eget_current_stack();
+        H5Idec_ref(p_ctx->under_vol_id);
+        H5Eset_current_stack(err_id);
+
+        // Shut down metadata manager framework(s) for file
+        MM_metadata_update_helper_term(p_ctx->mm);
+
+        // Release prop_ctx
+        free(p_ctx);
+    }
+
+    return 0;
+} /* end prop_ctx_dec_rc() */
 
 /*-------------------------------------------------------------------------
  * Function:    H5VL__pass_through_new_obj
@@ -1827,23 +2266,24 @@ void* p_encode(hid_t pl_id, size_t* size){
  *-------------------------------------------------------------------------
  */
 static H5VL_rlo_pass_through_t *
-H5VL_rlo_pass_through_new_obj(void *under_obj, rlo_obj_type_t obj_type, hid_t under_vol_id, VOL_MetadataHelper* mm)
+H5VL_rlo_pass_through_new_obj(void *under_obj, rlo_obj_type_t obj_type,
+    prop_ctx *p_ctx)
 {
     H5VL_rlo_pass_through_t *new_obj;
-    assert(mm);
 
+    assert(p_ctx);
+
+    // Allocate and initialize specific object info
     new_obj = (H5VL_rlo_pass_through_t *)calloc(1, sizeof(H5VL_rlo_pass_through_t));
-
     new_obj->under_object = under_obj;
-    new_obj->under_vol_id = under_vol_id;
-    H5Iinc_ref(new_obj->under_vol_id);
-
     new_obj->obj_type = obj_type;
 
-    new_obj->metadata_helper = mm;
-    new_obj->metadata_helper->ref_cnt++;
+    /* Share the file's context info */
+    new_obj->p_ctx = p_ctx;
+    prop_ctx_inc_rc(p_ctx);
 
     DEBUG_PRINT
+
     return new_obj;
 } /* end H5VL__pass_through_new_obj() */
 
@@ -1867,18 +2307,16 @@ H5VL_rlo_pass_through_new_obj(void *under_obj, rlo_obj_type_t obj_type, hid_t un
 static herr_t
 H5VL_rlo_pass_through_free_obj(H5VL_rlo_pass_through_t *obj)
 {
-    hid_t err_id;
-
     DEBUG_PRINT
-    err_id = H5Eget_current_stack();
-    H5Idec_ref(obj->under_vol_id);
-    H5Eset_current_stack(err_id);
 
-    assert(obj->metadata_helper);
-    obj->metadata_helper->ref_cnt--;
-    obj->metadata_helper = NULL;
+    assert(obj->p_ctx);
 
+    // Decrement count on shared context
+    prop_ctx_dec_rc(obj->p_ctx);
+
+    obj->p_ctx = NULL;
     free(obj);
+
     return 0;
 } /* end H5VL__pass_through_free_obj() */
 
@@ -1921,16 +2359,13 @@ H5VL_rlo_pass_through_register(void)
  *-------------------------------------------------------------------------
  */
 static herr_t
-H5VL_rlo_pass_through_init(hid_t vipl_id)
+H5VL_rlo_pass_through_init(hid_t __attribute__((unused)) vipl_id)
 {
 #ifdef ENABLE_RLO_PASSTHRU_LOGGING
     printf("------- PASS THROUGH VOL INIT\n");
 #endif
 
     DEBUG_PRINT
-
-    /* Shut compiler up about unused parameter */
-    vipl_id = vipl_id;
 
     return 0;
 } /* end H5VL_rlo_pass_through_init() */
@@ -2008,6 +2443,7 @@ H5VL_rlo_pass_through_info_copy(const void *_info)
     new_info->time_window_size = info->time_window_size;
     new_info->mode = info->mode;
     new_info->world_size = info->world_size;
+    new_info->my_rank = info->my_rank;
     return new_info;
 } /* end H5VL_rlo_pass_through_info_copy() */
 
@@ -2214,7 +2650,7 @@ H5VL_rlo_pass_through_get_object(const void *obj)
     printf("------- PASS THROUGH VOL Get object\n");
 #endif
 
-    return H5VLget_object(o->under_object, o->under_vol_id);
+    return H5VLget_object(o->under_object, o->p_ctx->under_vol_id);
 } /* end H5VL_rlo_pass_through_get_object() */
 
 
@@ -2229,11 +2665,11 @@ H5VL_rlo_pass_through_get_object(const void *obj)
  *---------------------------------------------------------------------------
  */
 
-//Framework call it
+//VOL framework calls this routine
 static herr_t
 H5VL_rlo_pass_through_get_wrap_ctx(const void *obj, void **wrap_ctx)
 {
-    //obj: a valid A envelop
+    //obj: a valid "A envelope"
     const H5VL_rlo_pass_through_t *o = (const H5VL_rlo_pass_through_t *)obj;
     H5VL_rlo_pass_through_wrap_ctx_t *new_wrap_ctx;
 
@@ -2244,13 +2680,12 @@ H5VL_rlo_pass_through_get_wrap_ctx(const void *obj, void **wrap_ctx)
     /* Allocate new VOL object wrapping context for the pass through connector */
     new_wrap_ctx = (H5VL_rlo_pass_through_wrap_ctx_t *)calloc(1, sizeof(H5VL_rlo_pass_through_wrap_ctx_t));
 
-    /* Increment reference count on underlying VOL ID, and copy the VOL info */
-    new_wrap_ctx->under_vol_id = o->under_vol_id;
-    new_wrap_ctx->metadata_helper = o->metadata_helper;
-    new_wrap_ctx->metadata_helper->ref_cnt++;
+    /* Get pointer to this file's execution context, and increment its refcount */
+    new_wrap_ctx->p_ctx = o->p_ctx;
+    new_wrap_ctx->p_ctx->ref_count++;
 
-    H5Iinc_ref(new_wrap_ctx->under_vol_id);
-    H5VLget_wrap_ctx(o->under_object, o->under_vol_id, &new_wrap_ctx->under_wrap_ctx);
+    /* Get wrap context for underlying VOL connector */
+    H5VLget_wrap_ctx(o->under_object, o->p_ctx->under_vol_id, &new_wrap_ctx->under_wrap_ctx);
 
     /* Set wrap context to return */
     *wrap_ctx = new_wrap_ctx;
@@ -2292,7 +2727,7 @@ H5VL_rlo_pass_through_wrap_object(void *obj, H5I_type_t obj_type, void *_wrap_ct
     // A knows nothing abnout the under layer VOL, which is B.
     // so it get to know that from wrap_ctx, which include under_vol_id_B,
     // and a wrap_ctx (under_wrap_ctx) that specify the layer under B, such as C.
-    under = H5VLwrap_object(obj, obj_type, wrap_ctx->under_vol_id, wrap_ctx->under_wrap_ctx);
+    under = H5VLwrap_object(obj, obj_type, wrap_ctx->p_ctx->under_vol_id, wrap_ctx->under_wrap_ctx);
 
 
     // A ask a B envelop from B, info of B is in wrap_ctx
@@ -2337,7 +2772,7 @@ H5VL_rlo_pass_through_wrap_object(void *obj, H5I_type_t obj_type, void *_wrap_ct
 
         /*  wrap_ctx->under_vol_id is under_vol_id_B  */
 
-        new_obj = H5VL_rlo_pass_through_new_obj(under, rlo_type, wrap_ctx->under_vol_id, wrap_ctx->metadata_helper);
+        new_obj = H5VL_rlo_pass_through_new_obj(under, rlo_type, wrap_ctx->p_ctx);
 
     }
     else
@@ -2373,7 +2808,7 @@ H5VL_rlo_pass_through_unwrap_object(void *obj)
     DEBUG_PRINT
 
     /* Unrap the object with the underlying VOL */
-    under = H5VLunwrap_object(o->under_object, o->under_vol_id);
+    under = H5VLunwrap_object(o->under_object, o->p_ctx->under_vol_id);
 
     if(under)
         H5VL_rlo_pass_through_free_obj(o);
@@ -2401,23 +2836,17 @@ static herr_t
 H5VL_rlo_pass_through_free_wrap_ctx(void *_wrap_ctx)
 {
     H5VL_rlo_pass_through_wrap_ctx_t *wrap_ctx = (H5VL_rlo_pass_through_wrap_ctx_t *)_wrap_ctx;
-    hid_t err_id;
 
 #ifdef ENABLE_RLO_PASSTHRU_LOGGING
     printf("------- PASS THROUGH VOL WRAP CTX Free\n");
 #endif
 
-    err_id = H5Eget_current_stack();
-
     /* Release underlying VOL ID and wrap context */
     if(wrap_ctx->under_wrap_ctx)
-        H5VLfree_wrap_ctx(wrap_ctx->under_wrap_ctx, wrap_ctx->under_vol_id);
+        H5VLfree_wrap_ctx(wrap_ctx->under_wrap_ctx, wrap_ctx->p_ctx->under_vol_id);
 
-    wrap_ctx->metadata_helper->ref_cnt--;
-
-    H5Idec_ref(wrap_ctx->under_vol_id);
-
-    H5Eset_current_stack(err_id);
+    // Decrement refcount on prop_ctx
+    prop_ctx_dec_rc(wrap_ctx->p_ctx);
 
     /* Free pass through wrap context object itself */
     free(wrap_ctx);
@@ -2469,7 +2898,7 @@ H5VL_rlo_pass_through_attr_create(void *obj, const H5VL_loc_params_t *loc_params
     H5O_info_t oinfo;
     param_tmp.type = H5VL_OBJECT_BY_SELF;
     param_tmp.obj_type = loc_params->obj_type;
-    get_native_info(o->under_object, o->under_vol_id, dxpl_id, NULL,
+    get_native_info(o->under_object, o->p_ctx->under_vol_id, dxpl_id, NULL,
             H5VL_NATIVE_OBJECT_GET_INFO, &param_tmp, &oinfo, H5O_INFO_BASIC);
     param_in.parent_obj_addr = oinfo.addr;
 
@@ -2493,37 +2922,29 @@ H5VL_rlo_pass_through_attr_create(void *obj, const H5VL_loc_params_t *loc_params
 
     //DEBUG_PRINT
     void* proposal_data = NULL;
-
     size_t p_data_size = attr_create_encoder(&param_in, &proposal_data);
     DEBUG_PRINT
     //prop_param_attr_create_test(&param_in);
-    param_attr t;// = calloc(1, sizeof(param_attr));
-    attr_create_decoder(proposal_data, &t);
-    //prop_param_attr_create_test(&t);
-    //DEBUG_PRINT
-    //param_ds_create* prop_param = calloc(1, sizeof(param_ds_create));
 
-    proposal_id pid = MY_RANK_DEBUG;//getpid();
+    // param_attr t;
+    // attr_create_decoder(proposal_data, &t);
+    // prop_param_attr_create_test(&t);
+
+    proposal_id pid = MY_RANK_DEBUG;
     proposal* p = compose_proposal(pid, ATTR_CREATE, proposal_data, p_data_size);//
 
-    assert(o->metadata_helper);
-    assert(o->metadata_helper->mm);
+    assert(o->p_ctx);
+    assert(o->p_ctx->mm);
+    ((prop_ctx*)(o->p_ctx->mm->app_ctx))->resulting_obj_out = NULL;
+    int ret = MM_submit_proposal(o->p_ctx->mm, p);
 
-    ((prop_ctx*)(o->metadata_helper->mm->app_ctx))->resulting_obj_out = NULL;
-
-    int ret = MM_submit_proposal(o->metadata_helper->mm, p);
-
-    if(ret == 1){
-        p->result_obj_local = ((prop_ctx*)(o->metadata_helper->mm->app_ctx))->resulting_obj_out;
-    }
+    if(ret == 1)
+        p->result_obj_local = ((prop_ctx*)(o->p_ctx->mm->app_ctx))->resulting_obj_out;
     //DEBUG_PRINT
 
     if(p->result_obj_local) {
         DEBUG_PRINT
-        attr = H5VL_rlo_pass_through_new_obj(p->result_obj_local, VL_ATTRIBUTES,
-                o->under_vol_id, o->metadata_helper);
-
-
+        attr = H5VL_rlo_pass_through_new_obj(p->result_obj_local, VL_ATTRIBUTES, o->p_ctx);
     } /* end if */
     else
         attr = NULL;
@@ -2554,11 +2975,9 @@ H5VL_rlo_pass_through_attr_open(void *obj, const H5VL_loc_params_t *loc_params,
     printf("------- PASS THROUGH VOL ATTRIBUTE Open\n");
 #endif
 
-    under = H5VLattr_open(o->under_object, loc_params, o->under_vol_id, name, aapl_id, dxpl_id, req);
-    if(under) {
-        attr = H5VL_rlo_pass_through_new_obj(under, VL_ATTRIBUTES, o->under_vol_id, o->metadata_helper);
-
-    } /* end if */
+    under = H5VLattr_open(o->under_object, loc_params, o->p_ctx->under_vol_id, name, aapl_id, dxpl_id, req);
+    if(under)
+        attr = H5VL_rlo_pass_through_new_obj(under, VL_ATTRIBUTES, o->p_ctx);
     else
         attr = NULL;
 
@@ -2587,7 +3006,7 @@ H5VL_rlo_pass_through_attr_read(void *attr, hid_t mem_type_id, void *buf,
     printf("------- PASS THROUGH VOL ATTRIBUTE Read\n");
 #endif
 
-    ret_value = H5VLattr_read(o->under_object, o->under_vol_id, mem_type_id, buf, dxpl_id, req);
+    ret_value = H5VLattr_read(o->under_object, o->p_ctx->under_vol_id, mem_type_id, buf, dxpl_id, req);
 
     return ret_value;
 } /* end H5VL_rlo_pass_through_attr_read() */
@@ -2628,7 +3047,7 @@ H5VL_rlo_pass_through_attr_write(void *attr, hid_t mem_type_id, const void *buf,
     //parent_obj type and addr
     param_tmp.type = H5VL_OBJECT_BY_SELF;
     param_tmp.obj_type = H5I_ATTR;
-    get_native_info(o->under_object, o->under_vol_id, H5P_DEFAULT, NULL,
+    get_native_info(o->under_object, o->p_ctx->under_vol_id, H5P_DEFAULT, NULL,
             H5VL_NATIVE_OBJECT_GET_INFO, &param_tmp, &oinfo, H5O_INFO_BASIC);
     param_in->parent_obj_addr = oinfo.addr;
 
@@ -2649,38 +3068,40 @@ H5VL_rlo_pass_through_attr_write(void *attr, hid_t mem_type_id, const void *buf,
             break;
     }
 
+
+
+        //printf("%s:%d: getpid() = %d, my_rank = %d, checking void* buf = %d\n", __func__, __LINE__, getpid(), o->p_ctx->my_rank, *(int*)buf);
+
+
     //attr_name and size
-    char* attr_name = calloc(1, 64);
-    attr_get(o->under_object, o->under_vol_id, H5VL_ATTR_GET_NAME, H5P_DEFAULT, NULL, &attr_name);
+    char* attr_name = attr_get_name(o->under_object, o->p_ctx->under_vol_id);
+    param_in->attr_name_size = strlen(attr_name) + 1;
+    param_in->attr_name = attr_name;
 
-    param_in->attr_name_size = strlen(attr_name)+1;
-    param_in->attr_name = calloc(1, param_in->attr_name_size);
-    memcpy(param_in->attr_name, attr_name, param_in->attr_name_size);
-
-    printf("Verifying attr_name: attr_name = [%s], param_in->attr_name = [%s]\n", attr_name, param_in->attr_name);
+    //printf("Verifying attr_name: attr_name = [%s], param_in->attr_name = [%s]\n", attr_name, param_in->attr_name);
 
     //calculate buf size
-    status = attr_get(o->under_object, o->under_vol_id, H5VL_ATTR_GET_SPACE, H5P_DEFAULT, NULL, &space_id);
-    printf("%d:%s:%d: no_elem = %d\n", MY_RANK_DEBUG, __func__, __LINE__, no_elem);
+    status = attr_get(o->under_object, o->p_ctx->under_vol_id, H5VL_ATTR_GET_SPACE, H5P_DEFAULT, NULL, &space_id);
+
     no_elem = H5Sget_simple_extent_npoints(space_id);
     status = H5Sclose(space_id);
     param_in->buf_size = no_elem * H5Tget_size(mem_type_id);
     param_in->buf = (void*)buf;
-
+    //printf("%d:%s:%d: no_elem = %d, buf_size = %lu\n", MY_RANK_DEBUG, __func__, __LINE__, no_elem, param_in->buf_size);
 
 
     //composing proposal
     void* attr_param_data = NULL;
     size_t proposal_size = attr_write_encoder(param_in, &attr_param_data);
-    proposal_id pid = MY_RANK_DEBUG;//getpid();
+    proposal_id pid = getpid();//MY_RANK_DEBUG;//getpid();
     proposal* p = compose_proposal(pid, ATTR_WRITE, attr_param_data, proposal_size);//
 
-    assert(o->metadata_helper);
-    assert(o->metadata_helper->mm);
+    assert(o->p_ctx);
+    assert(o->p_ctx->mm);
 
-    ((prop_ctx*)(o->metadata_helper->mm->app_ctx))->resulting_obj_out = NULL;
+    ((prop_ctx*)(o->p_ctx->mm->app_ctx))->resulting_obj_out = NULL;
 
-    ret_value = MM_submit_proposal(o->metadata_helper->mm, p);
+    ret_value = MM_submit_proposal(o->p_ctx->mm, p);
     return ret_value;
 } /* end H5VL_rlo_pass_through_attr_write() */
 
@@ -2706,7 +3127,7 @@ H5VL_rlo_pass_through_attr_get(void *obj, H5VL_attr_get_t get_type, hid_t dxpl_i
     printf("------- PASS THROUGH VOL ATTRIBUTE Get\n");
 #endif
 
-    ret_value = H5VLattr_get(o->under_object, o->under_vol_id, get_type, dxpl_id, req, arguments);
+    ret_value = H5VLattr_get(o->under_object, o->p_ctx->under_vol_id, get_type, dxpl_id, req, arguments);
 
     return ret_value;
 } /* end H5VL_rlo_pass_through_attr_get() */
@@ -2733,7 +3154,7 @@ H5VL_rlo_pass_through_attr_specific(void *obj, const H5VL_loc_params_t *loc_para
     printf("------- PASS THROUGH VOL ATTRIBUTE Specific\n");
 #endif
 
-    ret_value = H5VLattr_specific(o->under_object, loc_params, o->under_vol_id, specific_type, dxpl_id, req, arguments);
+    ret_value = H5VLattr_specific(o->under_object, loc_params, o->p_ctx->under_vol_id, specific_type, dxpl_id, req, arguments);
 
     return ret_value;
 } /* end H5VL_rlo_pass_through_attr_specific() */
@@ -2760,7 +3181,7 @@ H5VL_rlo_pass_through_attr_optional(void *obj, hid_t dxpl_id, void **req,
     printf("------- PASS THROUGH VOL ATTRIBUTE Optional\n");
 #endif
 
-    ret_value = H5VLattr_optional(o->under_object, o->under_vol_id, dxpl_id, req, arguments);
+    ret_value = H5VLattr_optional(o->under_object, o->p_ctx->under_vol_id, dxpl_id, req, arguments);
 
     return ret_value;
 } /* end H5VL_rlo_pass_through_attr_optional() */
@@ -2786,7 +3207,7 @@ H5VL_rlo_pass_through_attr_close(void *attr, hid_t dxpl_id, void **req)
     printf("------- PASS THROUGH VOL ATTRIBUTE Close\n");
 #endif
 
-    ret_value = H5VLattr_close(o->under_object, o->under_vol_id, dxpl_id, req);
+    ret_value = H5VLattr_close(o->under_object, o->p_ctx->under_vol_id, dxpl_id, req);
 
     /* Release our wrapper, if underlying attribute was closed */
     if(ret_value >= 0)
@@ -2841,7 +3262,6 @@ H5VL_rlo_pass_through_dataset_create(void *obj, const H5VL_loc_params_t *loc_par
     param_in.name_size = strlen(name) + 1;
     param_in.loc_param_size = 0; // will be set in encoding function.
 
-    param_in.parent_type = loc_params->obj_type;
     param_in.loc_params = (H5VL_loc_params_t*)loc_params;
     param_in.name = (char*)name;
 
@@ -2850,7 +3270,7 @@ H5VL_rlo_pass_through_dataset_create(void *obj, const H5VL_loc_params_t *loc_par
     H5O_info_t oinfo;
     param_tmp.type = H5VL_OBJECT_BY_SELF;
     param_tmp.obj_type = loc_params->obj_type;
-    get_native_info(o->under_object, o->under_vol_id, dxpl_id, NULL, H5VL_NATIVE_OBJECT_GET_INFO, &param_tmp, &oinfo, H5O_INFO_BASIC);
+    get_native_info(o->under_object, o->p_ctx->under_vol_id, dxpl_id, NULL, H5VL_NATIVE_OBJECT_GET_INFO, &param_tmp, &oinfo, H5O_INFO_BASIC);
     param_in.parent_obj_addr = oinfo.addr;
 
     switch(loc_params->obj_type){//parent type
@@ -2872,19 +3292,19 @@ H5VL_rlo_pass_through_dataset_create(void *obj, const H5VL_loc_params_t *loc_par
     DEBUG_PRINT
 
     proposal_id pid = MY_RANK_DEBUG;//getpid();
-    proposal* p = compose_proposal(pid, DS_CREATE, proposal_data, p_data_size);//
+    proposal* p = compose_proposal(pid, DS_CREATE, proposal_data, p_data_size);
     //printf("%s:%d: Original Proposal pid = %d, p_data_len = %lu\n", __func__, __LINE__, p->pid, p->p_data_len);
-    assert(o->metadata_helper);
+    assert(o->p_ctx);
     //DEBUG_PRINT
-    assert(o->metadata_helper->mm);
+    assert(o->p_ctx->mm);
 
-    ((prop_ctx*)(o->metadata_helper->mm->app_ctx))->resulting_obj_out = NULL;
+    ((prop_ctx*)(o->p_ctx->mm->app_ctx))->resulting_obj_out = NULL;
     DEBUG_PRINT
-    int ret = MM_submit_proposal(o->metadata_helper->mm, p);
+    int ret = MM_submit_proposal(o->p_ctx->mm, p);
     DEBUG_PRINT
     if(ret == 1){
         DEBUG_PRINT
-        p->result_obj_local = ((prop_ctx*)(o->metadata_helper->mm->app_ctx))->resulting_obj_out;
+        p->result_obj_local = ((prop_ctx*)(o->p_ctx->mm->app_ctx))->resulting_obj_out;
         //printf("%s:%d: resulting obj = %p\n", __func__, __LINE__, p->result_obj_local);
     }else{
         printf("%s:%d: ret = %d\n", __func__, __LINE__, ret);
@@ -2893,7 +3313,7 @@ H5VL_rlo_pass_through_dataset_create(void *obj, const H5VL_loc_params_t *loc_par
 
     if(p->result_obj_local) {
         DEBUG_PRINT
-        dset = H5VL_rlo_pass_through_new_obj(p->result_obj_local, VL_DATASET, o->under_vol_id, o->metadata_helper);
+        dset = H5VL_rlo_pass_through_new_obj(p->result_obj_local, VL_DATASET, o->p_ctx);
     } /* end if */
     else
         dset = NULL;
@@ -2924,10 +3344,9 @@ H5VL_rlo_pass_through_dataset_open(void *obj, const H5VL_loc_params_t *loc_param
     printf("------- PASS THROUGH VOL DATASET Open\n");
 #endif
 
-    under = H5VLdataset_open(o->under_object, loc_params, o->under_vol_id, name, dapl_id, dxpl_id, req);
-    if(under) {
-        dset = H5VL_rlo_pass_through_new_obj(under, VL_DATASET, o->under_vol_id, o->metadata_helper);
-    } /* end if */
+    under = H5VLdataset_open(o->under_object, loc_params, o->p_ctx->under_vol_id, name, dapl_id, dxpl_id, req);
+    if(under)
+        dset = H5VL_rlo_pass_through_new_obj(under, VL_DATASET, o->p_ctx);
     else
         dset = NULL;
 
@@ -2956,7 +3375,7 @@ H5VL_rlo_pass_through_dataset_read(void *dset, hid_t mem_type_id, hid_t mem_spac
     printf("------- PASS THROUGH VOL DATASET Read\n");
 #endif
 
-    ret_value = H5VLdataset_read(o->under_object, o->under_vol_id, mem_type_id, mem_space_id, file_space_id, plist_id, buf, req);
+    ret_value = H5VLdataset_read(o->under_object, o->p_ctx->under_vol_id, mem_type_id, mem_space_id, file_space_id, plist_id, buf, req);
 
     return ret_value;
 } /* end H5VL_rlo_pass_through_dataset_read() */
@@ -2983,7 +3402,7 @@ H5VL_rlo_pass_through_dataset_write(void *dset, hid_t mem_type_id, hid_t mem_spa
     printf("------- PASS THROUGH VOL DATASET Write\n");
 #endif
 
-    ret_value = H5VLdataset_write(o->under_object, o->under_vol_id, mem_type_id, mem_space_id, file_space_id, plist_id, buf, req);
+    ret_value = H5VLdataset_write(o->under_object, o->p_ctx->under_vol_id, mem_type_id, mem_space_id, file_space_id, plist_id, buf, req);
 
     return ret_value;
 } /* end H5VL_rlo_pass_through_dataset_write() */
@@ -3010,7 +3429,7 @@ H5VL_rlo_pass_through_dataset_get(void *dset, H5VL_dataset_get_t get_type,
     printf("------- PASS THROUGH VOL DATASET Get\n");
 #endif
 
-    ret_value = H5VLdataset_get(o->under_object, o->under_vol_id, get_type, dxpl_id, req, arguments);
+    ret_value = H5VLdataset_get(o->under_object, o->p_ctx->under_vol_id, get_type, dxpl_id, req, arguments);
 
     return ret_value;
 } /* end H5VL_rlo_pass_through_dataset_get() */
@@ -3036,7 +3455,7 @@ H5VL_rlo_pass_through_dataset_specific(void *obj, H5VL_dataset_specific_t specif
 #ifdef ENABLE_RLO_PASSTHRU_LOGGING
     printf("------- PASS THROUGH VOL H5Dspecific\n");
 #endif
-
+    DEBUG_PRINT
     /* Different actions depending on the type of specific operation */
     switch(specific_type) {
         case H5VL_DATASET_SET_EXTENT:
@@ -3047,23 +3466,23 @@ H5VL_rlo_pass_through_dataset_specific(void *obj, H5VL_dataset_specific_t specif
                 new_size = va_arg(arguments, hsize_t *);
 
 {
-printf("%u:%s:%u - new_size = [%llu, %llu]\n", 
-        MY_RANK_DEBUG, __func__, __LINE__, (unsigned long long)new_size[0],
+printf("%u:%s:%u - new_size = [%llu, %llu]\n",
+MY_RANK_DEBUG, __func__, __LINE__, (unsigned long long)new_size[0],
         (unsigned long long)new_size[1]);
 }
 
                 void* proposal_data = NULL;
-                size_t p_data_size = ds_extend_encoder(o, o->under_vol_id, new_size, &proposal_data);
+                size_t p_data_size = ds_extend_encoder(o->under_object, o->p_ctx->under_vol_id, new_size, &proposal_data);
                 DEBUG_PRINT
 
                 proposal_id pid = MY_RANK_DEBUG;//getpid();
-                proposal* p = compose_proposal(pid, DS_CREATE, proposal_data, p_data_size);
-
-                assert(o->metadata_helper);
-                assert(o->metadata_helper->mm);
+                proposal* p = compose_proposal(pid, DS_EXTEND, proposal_data, p_data_size);
+                o->p_ctx->under_obj = o->under_object;
+                assert(o->p_ctx);
+                assert(o->p_ctx->mm);
 
                 DEBUG_PRINT
-                ret_value = MM_submit_proposal(o->metadata_helper->mm, p);
+                ret_value = MM_submit_proposal(o->p_ctx->mm, p);
                 DEBUG_PRINT
 
                 // assert(0 && "Yay!");
@@ -3075,7 +3494,7 @@ printf("%u:%s:%u - new_size = [%llu, %llu]\n",
             break;
     } /* end switch */
 
-    // ret_value = H5VLdataset_specific(o->under_object, o->under_vol_id, specific_type, dxpl_id, req, arguments);
+    // ret_value = H5VLdataset_specific(o->under_object, o->p_ctx->under_vol_id, specific_type, dxpl_id, req, arguments);
     return ret_value;
 } /* end H5VL_rlo_pass_through_dataset_specific() */
 
@@ -3101,7 +3520,7 @@ H5VL_rlo_pass_through_dataset_optional(void *obj, hid_t dxpl_id, void **req,
     printf("------- PASS THROUGH VOL DATASET Optional\n");
 #endif
 
-    ret_value = H5VLdataset_optional(o->under_object, o->under_vol_id, dxpl_id, req, arguments);
+    ret_value = H5VLdataset_optional(o->under_object, o->p_ctx->under_vol_id, dxpl_id, req, arguments);
 
     return ret_value;
 } /* end H5VL_rlo_pass_through_dataset_optional() */
@@ -3128,7 +3547,7 @@ H5VL_rlo_pass_through_dataset_close(void *dset, hid_t dxpl_id, void **req)
 #endif
 
     DEBUG_PRINT
-    ret_value = H5VLdataset_close(o->under_object, o->under_vol_id, dxpl_id, req);
+    ret_value = H5VLdataset_close(o->under_object, o->p_ctx->under_vol_id, dxpl_id, req);
 
     /* Release our wrapper, if underlying dataset was closed */
     if(ret_value >= 0)
@@ -3148,6 +3567,8 @@ H5VL_rlo_pass_through_dataset_close(void *dset, hid_t dxpl_id, void **req)
  *
  *-------------------------------------------------------------------------
  */
+
+
 static void *
 H5VL_rlo_pass_through_datatype_commit(void *obj, const H5VL_loc_params_t *loc_params,
     const char *name, hid_t type_id, hid_t lcpl_id, hid_t tcpl_id, hid_t tapl_id,
@@ -3160,14 +3581,81 @@ H5VL_rlo_pass_through_datatype_commit(void *obj, const H5VL_loc_params_t *loc_pa
 #ifdef ENABLE_RLO_PASSTHRU_LOGGING
     printf("------- PASS THROUGH VOL DATATYPE Commit\n");
 #endif
+    param_dt_commit param_in;
 
-    under = H5VLdatatype_commit(o->under_object, loc_params, o->under_vol_id, name, type_id, lcpl_id, tcpl_id, tapl_id, dxpl_id, req);
-    if(under) {
-        dt = H5VL_rlo_pass_through_new_obj(under, VL_NAMED_DATATYPE, o->under_vol_id, o->metadata_helper);
+    param_in.type_id = type_id;
 
+    param_in.lcpl_id = lcpl_id;
+    param_in.tcpl_id = tcpl_id;
+    param_in.tapl_id = tapl_id;
+    param_in.dxpl_id = dxpl_id;
+
+    //by self, identical with ds_create
+    //Get parent object native id/addr
+    H5VL_loc_params_t param_tmp;
+    H5O_info_t oinfo;
+    param_tmp.type = H5VL_OBJECT_BY_SELF;
+    param_tmp.obj_type = loc_params->obj_type;
+    get_native_info(o->under_object, o->p_ctx->under_vol_id, dxpl_id, NULL, H5VL_NATIVE_OBJECT_GET_INFO, &param_tmp, &oinfo, H5O_INFO_BASIC);
+    param_in.parent_obj_addr = oinfo.addr;
+
+    switch(loc_params->obj_type){//parent type
+        case H5I_FILE:
+            param_in.parent_type = VL_FILE;
+            break;
+        case H5I_GROUP:
+            param_in.parent_type = VL_GROUP;
+            break;
+        default:
+            assert(0 && "Wrong type: Parent obj type could only be FILE or GROUP.");
+            break;
+    }
+    //DEBUG_PRINT
+
+    param_in.loc_param_size = 0; // will be set in encoding function.
+    param_in.loc_params = (H5VL_loc_params_t*)loc_params;
+    param_in.name_size = strlen(name) + 1;
+    param_in.name = (char*)name;
+
+    void* proposal_data = NULL;
+
+    size_t p_data_size = dt_commit_encoder(&param_in, &proposal_data);
+
+    DEBUG_PRINT
+
+    proposal_id pid = MY_RANK_DEBUG;//getpid();
+    proposal* p = compose_proposal(pid, DT_COMMIT, proposal_data, p_data_size);
+
+    assert(o->p_ctx);
+    //DEBUG_PRINT
+    assert(o->p_ctx->mm);
+
+    ((prop_ctx*)(o->p_ctx->mm->app_ctx))->resulting_obj_out = NULL;
+    DEBUG_PRINT
+    int ret = MM_submit_proposal(o->p_ctx->mm, p);
+
+    //under = H5VLdatatype_commit(o->under_object, loc_params, o->p_ctx->under_vol_id, name, type_id, lcpl_id, tcpl_id, tapl_id, dxpl_id, req);
+
+    if(ret == 1){
+        DEBUG_PRINT
+        p->result_obj_local = ((prop_ctx*)(o->p_ctx->mm->app_ctx))->resulting_obj_out;
+        //printf("%s:%d: resulting obj = %p\n", __func__, __LINE__, p->result_obj_local);
+    }else{
+        printf("%s:%d: ret = %d\n", __func__, __LINE__, ret);
+    }
+    DEBUG_PRINT
+
+    if(p->result_obj_local) {
+        DEBUG_PRINT
+        dt = H5VL_rlo_pass_through_new_obj(p->result_obj_local, VL_NAMED_DATATYPE, o->p_ctx);
     } /* end if */
     else
         dt = NULL;
+
+//    if(under)
+//        dt = H5VL_rlo_pass_through_new_obj(under, VL_NAMED_DATATYPE, o->p_ctx);
+//    else
+//        dt = NULL;
 
     return (void *)dt;
 } /* end H5VL_rlo_pass_through_datatype_commit() */
@@ -3195,11 +3683,9 @@ H5VL_rlo_pass_through_datatype_open(void *obj, const H5VL_loc_params_t *loc_para
     printf("------- PASS THROUGH VOL DATATYPE Open\n");
 #endif
 
-    under = H5VLdatatype_open(o->under_object, loc_params, o->under_vol_id, name, tapl_id, dxpl_id, req);
-    if(under) {
-        dt = H5VL_rlo_pass_through_new_obj(under, VL_NAMED_DATATYPE, o->under_vol_id, o->metadata_helper);
-
-    } /* end if */
+    under = H5VLdatatype_open(o->under_object, loc_params, o->p_ctx->under_vol_id, name, tapl_id, dxpl_id, req);
+    if(under)
+        dt = H5VL_rlo_pass_through_new_obj(under, VL_NAMED_DATATYPE, o->p_ctx);
     else
         dt = NULL;
 
@@ -3228,7 +3714,7 @@ H5VL_rlo_pass_through_datatype_get(void *dt, H5VL_datatype_get_t get_type,
     printf("------- PASS THROUGH VOL DATATYPE Get\n");
 #endif
 
-    ret_value = H5VLdatatype_get(o->under_object, o->under_vol_id, get_type, dxpl_id, req, arguments);
+    ret_value = H5VLdatatype_get(o->under_object, o->p_ctx->under_vol_id, get_type, dxpl_id, req, arguments);
 
     return ret_value;
 } /* end H5VL_rlo_pass_through_datatype_get() */
@@ -3249,18 +3735,13 @@ H5VL_rlo_pass_through_datatype_specific(void *obj, H5VL_datatype_specific_t spec
     hid_t dxpl_id, void **req, va_list arguments)
 {
     H5VL_rlo_pass_through_t *o = (H5VL_rlo_pass_through_t *)obj;
-    hid_t under_vol_id;
     herr_t ret_value;
 
 #ifdef ENABLE_RLO_PASSTHRU_LOGGING
     printf("------- PASS THROUGH VOL DATATYPE Specific\n");
 #endif
 
-    // Save copy of underlying VOL connector ID and prov helper, in case of
-    // refresh destroying the current object
-    under_vol_id = o->under_vol_id;
-
-    ret_value = H5VLdatatype_specific(o->under_object, o->under_vol_id, specific_type, dxpl_id, req, arguments);
+    ret_value = H5VLdatatype_specific(o->under_object, o->p_ctx->under_vol_id, specific_type, dxpl_id, req, arguments);
 
     return ret_value;
 } /* end H5VL_rlo_pass_through_datatype_specific() */
@@ -3287,7 +3768,7 @@ H5VL_rlo_pass_through_datatype_optional(void *obj, hid_t dxpl_id, void **req,
     printf("------- PASS THROUGH VOL DATATYPE Optional\n");
 #endif
 
-    ret_value = H5VLdatatype_optional(o->under_object, o->under_vol_id, dxpl_id, req, arguments);
+    ret_value = H5VLdatatype_optional(o->under_object, o->p_ctx->under_vol_id, dxpl_id, req, arguments);
 
     return ret_value;
 } /* end H5VL_rlo_pass_through_datatype_optional() */
@@ -3315,7 +3796,7 @@ H5VL_rlo_pass_through_datatype_close(void *dt, hid_t dxpl_id, void **req)
 
     assert(o->under_object);
 
-    ret_value = H5VLdatatype_close(o->under_object, o->under_vol_id, dxpl_id, req);
+    ret_value = H5VLdatatype_close(o->under_object, o->p_ctx->under_vol_id, dxpl_id, req);
 
     /* Release our wrapper, if underlying datatype was closed */
     if(ret_value >= 0)
@@ -3350,6 +3831,9 @@ H5VL_rlo_pass_through_file_create(const char *name, unsigned flags, hid_t fcpl_i
 
     /* Get copy of our VOL info from FAPL */
     H5Pget_vol_info(fapl_id, (void **)&info);
+    hbool_t is_collective;
+    H5Pget_all_coll_metadata_ops(fapl_id, &is_collective);
+
     //printf("%s:%d:mode = %d, world_size = %d, window size =  %d\n", __func__, __LINE__, info->world_size, info->world_size, info->time_window_size);
     /* Copy the FAPL */
     under_fapl_id = H5Pcopy(fapl_id);
@@ -3361,15 +3845,16 @@ H5VL_rlo_pass_through_file_create(const char *name, unsigned flags, hid_t fcpl_i
     under = H5VLfile_create(name, flags, fcpl_id, under_fapl_id, dxpl_id, req);
     if(under) {
         DEBUG_PRINT
-        prop_ctx* h5_ctx = calloc(1, sizeof(prop_ctx));
-        h5_ctx->file_under_object = under;
-        h5_ctx->under_vol_id = info->under_vol_id;
-        VOL_MetadataHelper* mm = metadata_helper_init(info, h5_ctx);
+        prop_ctx* h5_ctx;
 
+        // Note that this is unsafe when multiple files are opened
         MPI_Comm_rank(info->mpi_comm, &MY_RANK_DEBUG);
-        MPI_Comm_size(info->mpi_comm, &WORLD_SIZE_DEBUG);
 
-        file = H5VL_rlo_pass_through_new_obj(under, VL_FILE, info->under_vol_id, mm);
+        // Create new prop_ctx for this file
+        h5_ctx = prop_ctx_new(under, info, is_collective);
+        assert(h5_ctx);
+
+        file = H5VL_rlo_pass_through_new_obj(under, VL_FILE, h5_ctx);
         DEBUG_PRINT
     } /* end if */
     else
@@ -3383,46 +3868,6 @@ H5VL_rlo_pass_through_file_create(const char *name, unsigned flags, hid_t fcpl_i
 
     return (void *)file;
 } /* end H5VL_rlo_pass_through_file_create() */
-
-VOL_MetadataHelper* metadata_helper_init(H5VL_rlo_pass_through_info_t* info_in, prop_ctx* h5_app_ctx){
-    VOL_MetadataHelper* mm = calloc(1, sizeof(VOL_MetadataHelper));
-    h5_app_ctx->file_mm = mm;
-    VotingPlugin* vp = VM_voting_plugin_new();//empty for now.
-    vp_info_rlo* vp_info_in = calloc(1, sizeof(vp_info_rlo));
-
-    MPI_Comm_dup(info_in->mpi_comm, &(vp_info_in->mpi_comm));
-    if(info_in->mpi_info != MPI_INFO_NULL)
-        MPI_Info_dup(info_in->mpi_info, &(vp_info_in->mpi_info));
-    else
-        vp_info_in->mpi_info = MPI_INFO_NULL;
-    VP_ctx* vp_ctx_out = calloc(1, sizeof(vp_ctx_out));
-
-    vp->vp_ctx_in = vp_info_in;
-    vp->vp_init = &vp_init_RLO;//vp_init_RLO(&h5_judgement, h5_app_ctx, vp_info_in, &(vp_ctx_out->eng));
-    vp->vp_make_progress = &vp_make_progress_RLO;
-    vp->vp_check_my_proposal_state = &vp_check_my_proposal_state_RLO;
-    vp->vp_checkout_proposal = &vp_checkout_proposal_RLO;
-    vp->vp_finalize = &vp_finalize_RLO;
-    vp->vp_rm_my_proposal = &vp_rm_my_proposal_RLO;
-    vp->vp_submit_proposal = &vp_submit_proposal_RLO;
-    vp->vp_submit_bcast = &vp_submit_bcast_RLO;
-    //printf("%s:%d:mode = %d, world_size = %d, window size =  %d\n", __func__, __LINE__, info_in->mode, info_in->world_size, info_in->time_window_size);
-    mm->mm = MM_metadata_update_helper_init(info_in->mode, info_in->world_size,
-            info_in->time_window_size, &h5_judgement, h5_app_ctx, vp, &cb_execute_H5VL_RLO);
-    mm->ref_cnt = 0;
-    return mm;
-}
-
-int metadata_helper_term(H5VL_rlo_pass_through_t* t_in_out){
-    assert(t_in_out);
-    assert(t_in_out->metadata_helper);
-    DEBUG_PRINT
-    //printf("%s:%d, metadata_helper->ref_cnt = %d\n", __func__, __LINE__, t_in_out->metadata_helper->ref_cnt);
-    //assert(t_in_out->metadata_helper->ref_cnt == 0);
-    MM_metadata_update_helper_term(t_in_out->metadata_helper->mm);
-    DEBUG_PRINT
-    return -1;
-}
 
 
 /*-------------------------------------------------------------------------
@@ -3450,7 +3895,8 @@ H5VL_rlo_pass_through_file_open(const char *name, unsigned flags, hid_t fapl_id,
 
     /* Get copy of our VOL info from FAPL */
     H5Pget_vol_info(fapl_id, (void **)&info);
-
+    hbool_t is_collective;
+    H5Pget_all_coll_metadata_ops(fapl_id, &is_collective);
     /* Copy the FAPL */
     under_fapl_id = H5Pcopy(fapl_id);
 
@@ -3462,15 +3908,16 @@ H5VL_rlo_pass_through_file_open(const char *name, unsigned flags, hid_t fapl_id,
     under = H5VLfile_open(name, flags, under_fapl_id, dxpl_id, req);
     if(under) {
         DEBUG_PRINT
-        prop_ctx* h5_ctx = calloc(1, sizeof(prop_ctx));
-        h5_ctx->file_under_object = under;
-        h5_ctx->under_vol_id = info->under_vol_id;
-        VOL_MetadataHelper* mm = metadata_helper_init(info, h5_ctx);
+        prop_ctx* h5_ctx;
 
+        // Note that this is unsafe when multiple files are opened
         MPI_Comm_rank(info->mpi_comm, &MY_RANK_DEBUG);
-        MPI_Comm_size(info->mpi_comm, &WORLD_SIZE_DEBUG);
 
-        file = H5VL_rlo_pass_through_new_obj(under, VL_FILE, info->under_vol_id, mm);
+        // Create new prop_ctx for this file
+        h5_ctx = prop_ctx_new(under, info, is_collective);
+        assert(h5_ctx);
+
+        file = H5VL_rlo_pass_through_new_obj(under, VL_FILE, h5_ctx);
         DEBUG_PRINT
     } /* end if */
     else
@@ -3507,7 +3954,7 @@ H5VL_rlo_pass_through_file_get(void *file, H5VL_file_get_t get_type, hid_t dxpl_
     printf("------- PASS THROUGH VOL FILE Get\n");
 #endif
 
-    ret_value = H5VLfile_get(o->under_object, o->under_vol_id, get_type, dxpl_id, req, arguments);
+    ret_value = H5VLfile_get(o->under_object, o->p_ctx->under_vol_id, get_type, dxpl_id, req, arguments);
 
     return ret_value;
 } /* end H5VL_rlo_pass_through_file_get() */
@@ -3575,10 +4022,10 @@ H5VL_rlo_pass_through_file_specific(void *file, H5VL_file_specific_t specific_ty
         plist_id = va_arg(arguments, hid_t);
 
         /* Keep the correct underlying VOL ID for possible async request token */
-        under_vol_id = o->under_vol_id;
+        under_vol_id = o->p_ctx->under_vol_id;
 
         /* Re-issue 'file specific' call, using the unwrapped pieces */
-        ret_value = H5VL_rlo_pass_through_file_specific_reissue(o->under_object, o->under_vol_id, specific_type, dxpl_id, req, (int)loc_type, name, child_file->under_object, plist_id);
+        ret_value = H5VL_rlo_pass_through_file_specific_reissue(o->under_object, o->p_ctx->under_vol_id, specific_type, dxpl_id, req, (int)loc_type, name, child_file->under_object, plist_id);
     } /* end if */
     else if(specific_type == H5VL_FILE_IS_ACCESSIBLE || specific_type == H5VL_FILE_DELETE) {
         H5VL_rlo_pass_through_info_t *info;
@@ -3620,9 +4067,9 @@ H5VL_rlo_pass_through_file_specific(void *file, H5VL_file_specific_t specific_ty
             va_copy(my_arguments, arguments);
 
         /* Keep the correct underlying VOL ID for possible async request token */
-        under_vol_id = o->under_vol_id;
+        under_vol_id = o->p_ctx->under_vol_id;
 
-        ret_value = H5VLfile_specific(o->under_object, o->under_vol_id, specific_type, dxpl_id, req, arguments);
+        ret_value = H5VLfile_specific(o->under_object, o->p_ctx->under_vol_id, specific_type, dxpl_id, req, arguments);
 
         /* Wrap file struct pointer, if we reopened one */
         if(specific_type == H5VL_FILE_REOPEN) {
@@ -3630,7 +4077,7 @@ H5VL_rlo_pass_through_file_specific(void *file, H5VL_file_specific_t specific_ty
                 void      **ret = va_arg(my_arguments, void **);
 
                 if(ret && *ret)
-                    *ret = H5VL_rlo_pass_through_new_obj(*ret, VL_FILE, o->under_vol_id, o->metadata_helper);
+                    *ret = H5VL_rlo_pass_through_new_obj(*ret, VL_FILE, o->p_ctx);
             } /* end if */
 
             /* Finish use of copied vararg list */
@@ -3663,7 +4110,7 @@ H5VL_rlo_pass_through_file_optional(void *file, hid_t dxpl_id, void **req,
     printf("------- PASS THROUGH VOL File Optional\n");
 #endif
 
-    ret_value = H5VLfile_optional(o->under_object, o->under_vol_id, dxpl_id, req, arguments);
+    ret_value = H5VLfile_optional(o->under_object, o->p_ctx->under_vol_id, dxpl_id, req, arguments);
 
     return ret_value;
 } /* end H5VL_rlo_pass_through_file_optional() */
@@ -3689,22 +4136,34 @@ H5VL_rlo_pass_through_file_close(void *file, hid_t dxpl_id, void **req)
     printf("------- PASS THROUGH VOL FILE Close\n");
 #endif
 
-    assert(o->metadata_helper);
+    assert(o->p_ctx);
     DEBUG_PRINT
 
-    metadata_helper_term(o);
-
+    // Let everyone know we are ready to close this file
+    proposal_id pid = MY_RANK_DEBUG;
+    proposal* p = compose_proposal(pid, FILE_CLOSE, NULL, 0);
+    MM_submit_proposal(o->p_ctx->mm, p);
     DEBUG_PRINT
 
-    ret_value = H5VLfile_close(o->under_object, o->under_vol_id, dxpl_id, req);
-
+    // If all the other ranks' file close proposals haven't been received,
+    // loop calling the metadata manager to process proposals until the
+    // file close refcount reaches the communicator's size (i.e. all
+    // ranks are now ready to close the file)
+    if(o->p_ctx->close_count < o->p_ctx->comm_size)
+        do {DEBUG_PRINT
+            usleep(1000);
+            MM_make_progress(o->p_ctx->mm);
+        } while(o->p_ctx->close_count < o->p_ctx->comm_size);
     DEBUG_PRINT
-
-    /* Release our wrapper, if underlying file was closed */
+    // Close underlying file
+    ret_value = H5VLfile_close(o->under_object, o->p_ctx->under_vol_id, dxpl_id, req);
+    DEBUG_PRINT
+    // Release our wrapper, if underlying file was closed
+    // (Releases the execution context also)
     if(ret_value >= 0)
         H5VL_rlo_pass_through_free_obj(o);
-    DEBUG_PRINT
-    return ret_value;
+
+    return 0;
 } /* end H5VL_rlo_pass_through_file_close() */
 
 
@@ -3748,7 +4207,7 @@ H5VL_rlo_pass_through_group_create(void *obj, const H5VL_loc_params_t *loc_param
     H5O_info_t oinfo;
     param_tmp.type = H5VL_OBJECT_BY_SELF;
     param_tmp.obj_type = loc_params->obj_type;
-    get_native_info(o->under_object, o->under_vol_id, dxpl_id, NULL, H5VL_NATIVE_OBJECT_GET_INFO, &param_tmp, &oinfo, H5O_INFO_BASIC);
+    get_native_info(o->under_object, o->p_ctx->under_vol_id, dxpl_id, NULL, H5VL_NATIVE_OBJECT_GET_INFO, &param_tmp, &oinfo, H5O_INFO_BASIC);
     param_in.parent_obj_addr = oinfo.addr;
 
     switch(loc_params->obj_type){//parent type
@@ -3772,19 +4231,16 @@ H5VL_rlo_pass_through_group_create(void *obj, const H5VL_loc_params_t *loc_param
     proposal_id pid = MY_RANK_DEBUG;//getpid();
     proposal* p = compose_proposal(pid, GROUP_CREATE, proposal_data, p_data_size);
 
-    assert(o->metadata_helper);
-    assert(o->metadata_helper->mm);
+    assert(o->p_ctx);
+    assert(o->p_ctx->mm);
 
-    ((prop_ctx*)(o->metadata_helper->mm->app_ctx))->resulting_obj_out = NULL;
+    ((prop_ctx*)(o->p_ctx->mm->app_ctx))->resulting_obj_out = NULL;
+    if(MM_submit_proposal(o->p_ctx->mm, p) == 1)
+        p->result_obj_local = ((prop_ctx*)(o->p_ctx->mm->app_ctx))->resulting_obj_out;
 
-    if(MM_submit_proposal(o->metadata_helper->mm, p) == 1){
-        p->result_obj_local = ((prop_ctx*)(o->metadata_helper->mm->app_ctx))->resulting_obj_out;
-    }
-
-    if(p->result_obj_local) {
-        DEBUG_PRINT
-        group = H5VL_rlo_pass_through_new_obj(p->result_obj_local, VL_GROUP, o->under_vol_id, o->metadata_helper);
-    } else
+    if(p->result_obj_local)
+        group = H5VL_rlo_pass_through_new_obj(p->result_obj_local, VL_GROUP, o->p_ctx);
+    else
         group = NULL;
 
     return (void *)group;
@@ -3813,10 +4269,9 @@ H5VL_rlo_pass_through_group_open(void *obj, const H5VL_loc_params_t *loc_params,
     printf("------- PASS THROUGH VOL GROUP Open\n");
 #endif
 
-    under = H5VLgroup_open(o->under_object, loc_params, o->under_vol_id, name, gapl_id, dxpl_id, req);
-    if(under) {
-        group = H5VL_rlo_pass_through_new_obj(under, VL_GROUP, o->under_vol_id, o->metadata_helper);
-    } /* end if */
+    under = H5VLgroup_open(o->under_object, loc_params, o->p_ctx->under_vol_id, name, gapl_id, dxpl_id, req);
+    if(under)
+        group = H5VL_rlo_pass_through_new_obj(under, VL_GROUP, o->p_ctx);
     else
         group = NULL;
 
@@ -3845,7 +4300,7 @@ H5VL_rlo_pass_through_group_get(void *obj, H5VL_group_get_t get_type, hid_t dxpl
     printf("------- PASS THROUGH VOL GROUP Get\n");
 #endif
 
-    ret_value = H5VLgroup_get(o->under_object, o->under_vol_id, get_type, dxpl_id, req, arguments);
+    ret_value = H5VLgroup_get(o->under_object, o->p_ctx->under_vol_id, get_type, dxpl_id, req, arguments);
 
     return ret_value;
 } /* end H5VL_rlo_pass_through_group_get() */
@@ -3866,18 +4321,13 @@ H5VL_rlo_pass_through_group_specific(void *obj, H5VL_group_specific_t specific_t
     hid_t dxpl_id, void **req, va_list arguments)
 {
     H5VL_rlo_pass_through_t *o = (H5VL_rlo_pass_through_t *)obj;
-    hid_t under_vol_id;
     herr_t ret_value;
 
 #ifdef ENABLE_RLO_PASSTHRU_LOGGING
     printf("------- PASS THROUGH VOL GROUP Specific\n");
 #endif
 
-    // Save copy of underlying VOL connector ID and prov helper, in case of
-    // refresh destroying the current object
-    under_vol_id = o->under_vol_id;
-
-    ret_value = H5VLgroup_specific(o->under_object, o->under_vol_id, specific_type, dxpl_id, req, arguments);
+    ret_value = H5VLgroup_specific(o->under_object, o->p_ctx->under_vol_id, specific_type, dxpl_id, req, arguments);
 
     return ret_value;
 } /* end H5VL_rlo_pass_through_group_specific() */
@@ -3904,7 +4354,7 @@ H5VL_rlo_pass_through_group_optional(void *obj, hid_t dxpl_id, void **req,
     printf("------- PASS THROUGH VOL GROUP Optional\n");
 #endif
 
-    ret_value = H5VLgroup_optional(o->under_object, o->under_vol_id, dxpl_id, req, arguments);
+    ret_value = H5VLgroup_optional(o->under_object, o->p_ctx->under_vol_id, dxpl_id, req, arguments);
 
     return ret_value;
 } /* end H5VL_rlo_pass_through_group_optional() */
@@ -3930,7 +4380,13 @@ H5VL_rlo_pass_through_group_close(void *grp, hid_t dxpl_id, void **req)
     printf("------- PASS THROUGH VOL H5Gclose\n");
 #endif
 
-    ret_value = H5VLgroup_close(o->under_object, o->under_vol_id, dxpl_id, req);
+    if(o->p_ctx->is_collective){//call rlo_vol, otherwise use regular ones.
+        //look at file_close.
+        //do this for ds_close, typeclose too
+    } else {
+        ret_value = H5VLgroup_close(o->under_object, o->p_ctx->under_vol_id, dxpl_id, req);
+    }
+
 
     /* Release our wrapper, if underlying file was closed */
     if(ret_value >= 0)
@@ -3991,7 +4447,7 @@ H5VL_rlo_pass_through_link_create(H5VL_link_create_type_t create_type, void *obj
 
     /* Try to retrieve the "under" VOL id */
     if(o)
-        under_vol_id = o->under_vol_id;
+        under_vol_id = o->p_ctx->under_vol_id;
 
     /* Fix up the link target object for hard link creation */
     if(H5VL_LINK_CREATE_HARD == create_type) {
@@ -4006,7 +4462,7 @@ H5VL_rlo_pass_through_link_create(H5VL_link_create_type_t create_type, void *obj
         if(cur_obj) {
             /* Check if we still need the "under" VOL ID */
             if(under_vol_id < 0)
-                under_vol_id = ((H5VL_rlo_pass_through_t *)cur_obj)->under_vol_id;
+                under_vol_id = ((H5VL_rlo_pass_through_t *)cur_obj)->p_ctx->under_vol_id;
 
             /* Set the object for the link target */
             cur_obj = ((H5VL_rlo_pass_through_t *)cur_obj)->under_object;
@@ -4053,9 +4509,9 @@ H5VL_rlo_pass_through_link_copy(void *src_obj, const H5VL_loc_params_t *loc_para
 
     /* Retrieve the "under" VOL id */
     if(o_src)
-        under_vol_id = o_src->under_vol_id;
+        under_vol_id = o_src->p_ctx->under_vol_id;
     else if(o_dst)
-        under_vol_id = o_dst->under_vol_id;
+        under_vol_id = o_dst->p_ctx->under_vol_id;
     assert(under_vol_id > 0);
 
     ret_value = H5VLlink_copy((o_src ? o_src->under_object : NULL), loc_params1, (o_dst ? o_dst->under_object : NULL), loc_params2, under_vol_id, lcpl_id, lapl_id, dxpl_id, req);
@@ -4095,9 +4551,9 @@ H5VL_rlo_pass_through_link_move(void *src_obj, const H5VL_loc_params_t *loc_para
 
     /* Retrieve the "under" VOL id */
     if(o_src)
-        under_vol_id = o_src->under_vol_id;
+        under_vol_id = o_src->p_ctx->under_vol_id;
     else if(o_dst)
-        under_vol_id = o_dst->under_vol_id;
+        under_vol_id = o_dst->p_ctx->under_vol_id;
     assert(under_vol_id > 0);
 
     ret_value = H5VLlink_move((o_src ? o_src->under_object : NULL), loc_params1, (o_dst ? o_dst->under_object : NULL), loc_params2, under_vol_id, lcpl_id, lapl_id, dxpl_id, req);
@@ -4127,7 +4583,7 @@ H5VL_rlo_pass_through_link_get(void *obj, const H5VL_loc_params_t *loc_params,
     printf("------- PASS THROUGH VOL LINK Get\n");
 #endif
 
-    ret_value = H5VLlink_get(o->under_object, loc_params, o->under_vol_id, get_type, dxpl_id, req, arguments);
+    ret_value = H5VLlink_get(o->under_object, loc_params, o->p_ctx->under_vol_id, get_type, dxpl_id, req, arguments);
 
     return ret_value;
 } /* end H5VL_rlo_pass_through_link_get() */
@@ -4154,7 +4610,7 @@ H5VL_rlo_pass_through_link_specific(void *obj, const H5VL_loc_params_t *loc_para
     printf("------- PASS THROUGH VOL LINK Specific\n");
 #endif
 
-    ret_value = H5VLlink_specific(o->under_object, loc_params, o->under_vol_id, specific_type, dxpl_id, req, arguments);
+    ret_value = H5VLlink_specific(o->under_object, loc_params, o->p_ctx->under_vol_id, specific_type, dxpl_id, req, arguments);
 
     return ret_value;
 } /* end H5VL_rlo_pass_through_link_specific() */
@@ -4181,7 +4637,7 @@ H5VL_rlo_pass_through_link_optional(void *obj, hid_t dxpl_id, void **req,
     printf("------- PASS THROUGH VOL LINK Optional\n");
 #endif
 
-    ret_value = H5VLlink_optional(o->under_object, o->under_vol_id, dxpl_id, req, arguments);
+    ret_value = H5VLlink_optional(o->under_object, o->p_ctx->under_vol_id, dxpl_id, req, arguments);
 
     return ret_value;
 } /* end H5VL_rlo_pass_through_link_optional() */
@@ -4209,11 +4665,9 @@ H5VL_rlo_pass_through_object_open(void *obj, const H5VL_loc_params_t *loc_params
     printf("------- PASS THROUGH VOL OBJECT Open\n");
 #endif
 
-    under = H5VLobject_open(o->under_object, loc_params, o->under_vol_id, opened_type, dxpl_id, req);
-    if(under) {
-        new_obj = H5VL_rlo_pass_through_new_obj(under, VL_INVALID, o->under_vol_id, o->metadata_helper);
-
-    } /* end if */
+    under = H5VLobject_open(o->under_object, loc_params, o->p_ctx->under_vol_id, opened_type, dxpl_id, req);
+    if(under)
+        new_obj = H5VL_rlo_pass_through_new_obj(under, VL_INVALID, o->p_ctx);
     else
         new_obj = NULL;
 
@@ -4245,7 +4699,7 @@ H5VL_rlo_pass_through_object_copy(void *src_obj, const H5VL_loc_params_t *src_lo
     printf("------- PASS THROUGH VOL OBJECT Copy\n");
 #endif
 
-    ret_value = H5VLobject_copy(o_src->under_object, src_loc_params, src_name, o_dst->under_object, dst_loc_params, dst_name, o_src->under_vol_id, ocpypl_id, lcpl_id, dxpl_id, req);
+    ret_value = H5VLobject_copy(o_src->under_object, src_loc_params, src_name, o_dst->under_object, dst_loc_params, dst_name, o_src->p_ctx->under_vol_id, ocpypl_id, lcpl_id, dxpl_id, req);
 
     return ret_value;
 } /* end H5VL_rlo_pass_through_object_copy() */
@@ -4271,7 +4725,7 @@ H5VL_rlo_pass_through_object_get(void *obj, const H5VL_loc_params_t *loc_params,
     printf("------- PASS THROUGH VOL OBJECT Get\n");
 #endif
 
-    ret_value = H5VLobject_get(o->under_object, loc_params, o->under_vol_id, get_type, dxpl_id, req, arguments);
+    ret_value = H5VLobject_get(o->under_object, loc_params, o->p_ctx->under_vol_id, get_type, dxpl_id, req, arguments);
 
     return ret_value;
 } /* end H5VL_rlo_pass_through_object_get() */
@@ -4293,18 +4747,13 @@ H5VL_rlo_pass_through_object_specific(void *obj, const H5VL_loc_params_t *loc_pa
     va_list arguments)
 {
     H5VL_rlo_pass_through_t *o = (H5VL_rlo_pass_through_t *)obj;
-    hid_t under_vol_id;
     herr_t ret_value;
 
 #ifdef ENABLE_RLO_PASSTHRU_LOGGING
     printf("------- PASS THROUGH VOL OBJECT Specific\n");
 #endif
 
-    // Save copy of underlying VOL connector ID and prov helper, in case of
-    // refresh destroying the current object
-    under_vol_id = o->under_vol_id;
-
-    ret_value = H5VLobject_specific(o->under_object, loc_params, o->under_vol_id, specific_type, dxpl_id, req, arguments);
+    ret_value = H5VLobject_specific(o->under_object, loc_params, o->p_ctx->under_vol_id, specific_type, dxpl_id, req, arguments);
 
     return ret_value;
 } /* end H5VL_rlo_pass_through_object_specific() */
@@ -4331,7 +4780,7 @@ H5VL_rlo_pass_through_object_optional(void *obj, hid_t dxpl_id, void **req,
     printf("------- PASS THROUGH VOL OBJECT Optional\n");
 #endif
 
-    ret_value = H5VLobject_optional(o->under_object, o->under_vol_id, dxpl_id, req, arguments);
+    ret_value = H5VLobject_optional(o->under_object, o->p_ctx->under_vol_id, dxpl_id, req, arguments);
 
     return ret_value;
 } /* end H5VL_rlo_pass_through_object_optional() */
@@ -4361,7 +4810,7 @@ H5VL_rlo_pass_through_request_wait(void *obj, uint64_t timeout,
     printf("------- PASS THROUGH VOL REQUEST Wait\n");
 #endif
 
-    ret_value = H5VLrequest_wait(o->under_object, o->under_vol_id, timeout, status);
+    ret_value = H5VLrequest_wait(o->under_object, o->p_ctx->under_vol_id, timeout, status);
 
     if(ret_value >= 0 && *status != H5ES_STATUS_IN_PROGRESS)
         H5VL_rlo_pass_through_free_obj(o);
@@ -4393,7 +4842,7 @@ H5VL_rlo_pass_through_request_notify(void *obj, H5VL_request_notify_t cb, void *
     printf("------- PASS THROUGH VOL REQUEST Wait\n");
 #endif
 
-    ret_value = H5VLrequest_notify(o->under_object, o->under_vol_id, cb, ctx);
+    ret_value = H5VLrequest_notify(o->under_object, o->p_ctx->under_vol_id, cb, ctx);
 
     if(ret_value >= 0)
         H5VL_rlo_pass_through_free_obj(o);
@@ -4424,7 +4873,7 @@ H5VL_rlo_pass_through_request_cancel(void *obj)
     printf("------- PASS THROUGH VOL REQUEST Cancel\n");
 #endif
 
-    ret_value = H5VLrequest_cancel(o->under_object, o->under_vol_id);
+    ret_value = H5VLrequest_cancel(o->under_object, o->p_ctx->under_vol_id);
 
     if(ret_value >= 0)
         H5VL_rlo_pass_through_free_obj(o);
@@ -4525,7 +4974,7 @@ H5VL_rlo_pass_through_request_specific(void *obj, H5VL_request_specific_t specif
                 status = va_arg(tmp_arguments, H5ES_status_t *);
 
                 /* Reissue the WAITANY 'request specific' call */
-                ret_value = H5VL_rlo_pass_through_request_specific_reissue(o->under_object, o->under_vol_id, specific_type, req_count, under_req_array, timeout, index, status);
+                ret_value = H5VL_rlo_pass_through_request_specific_reissue(o->under_object, o->p_ctx->under_vol_id, specific_type, req_count, under_req_array, timeout, index, status);
 
                 /* Release the completed request, if it completed */
                 if(ret_value >= 0 && *status != H5ES_STATUS_IN_PROGRESS) {
@@ -4547,7 +4996,7 @@ H5VL_rlo_pass_through_request_specific(void *obj, H5VL_request_specific_t specif
                 array_of_statuses = va_arg(tmp_arguments, H5ES_status_t *);
 
                 /* Reissue the WAITSOME 'request specific' call */
-                ret_value = H5VL_rlo_pass_through_request_specific_reissue(o->under_object, o->under_vol_id, specific_type, req_count, under_req_array, timeout, outcount, array_of_indices, array_of_statuses);
+                ret_value = H5VL_rlo_pass_through_request_specific_reissue(o->under_object, o->p_ctx->under_vol_id, specific_type, req_count, under_req_array, timeout, outcount, array_of_indices, array_of_statuses);
 
                 /* If any requests completed, release them */
                 if(ret_value >= 0 && *outcount > 0) {
@@ -4572,7 +5021,7 @@ H5VL_rlo_pass_through_request_specific(void *obj, H5VL_request_specific_t specif
                 array_of_statuses = va_arg(tmp_arguments, H5ES_status_t *);
 
                 /* Reissue the WAITALL 'request specific' call */
-                ret_value = H5VL_rlo_pass_through_request_specific_reissue(o->under_object, o->under_vol_id, specific_type, req_count, under_req_array, timeout, array_of_statuses);
+                ret_value = H5VL_rlo_pass_through_request_specific_reissue(o->under_object, o->p_ctx->under_vol_id, specific_type, req_count, under_req_array, timeout, array_of_statuses);
 
                 /* Release the completed requests */
                 if(ret_value >= 0) {
@@ -4621,7 +5070,7 @@ H5VL_rlo_pass_through_request_optional(void *obj, va_list arguments)
     printf("------- PASS THROUGH VOL REQUEST Optional\n");
 #endif
 
-    ret_value = H5VLrequest_optional(o->under_object, o->under_vol_id, arguments);
+    ret_value = H5VLrequest_optional(o->under_object, o->p_ctx->under_vol_id, arguments);
 
     return ret_value;
 } /* end H5VL_rlo_pass_through_request_optional() */
@@ -4648,10 +5097,11 @@ H5VL_rlo_pass_through_request_free(void *obj)
     printf("------- PASS THROUGH VOL REQUEST Free\n");
 #endif
 
-    ret_value = H5VLrequest_free(o->under_object, o->under_vol_id);
+    ret_value = H5VLrequest_free(o->under_object, o->p_ctx->under_vol_id);
 
     if(ret_value >= 0)
         H5VL_rlo_pass_through_free_obj(o);
 
     return ret_value;
 } /* end H5VL_rlo_pass_through_request_free() */
+

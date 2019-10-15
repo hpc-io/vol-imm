@@ -56,8 +56,7 @@ int MM_voting_proccess(metadata_manager* meta_eng);
 int MM_ledger_proccess(metadata_manager* meta_eng);
 int MM_execution_proccess(metadata_manager* meta_eng);
 int MM_submit_proposal(metadata_manager* meta_eng, proposal* p);
-
-//int get_my_verdict(metadata_engine* meta_eng);
+int MM_make_progress(metadata_manager *mm);
 
 time_stamp MM_get_time_stamp_us();//time_stamp in microsec
 

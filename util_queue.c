@@ -280,3 +280,28 @@ int main(int argc, char* argv[]){
 
 }
 */
+
+int gen_queue_iterate(gen_queue *q, gen_queue_iter_cb cb, void *cb_ctx)
+{
+    Queue_node *cur;
+
+    assert(q);
+    assert(cb);
+
+    cur = q->head;
+    while(cur) {
+        Queue_node *next;
+
+        // Protect against current node being removed from queue
+        next = cur->next;
+
+        // Invoke callback
+        (*cb)(cur, cb_ctx);
+
+        // Advance to next node, using previously saved 'next' pointer
+        cur = next;
+    }
+
+    return 0;
+}
+

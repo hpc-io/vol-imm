@@ -52,23 +52,31 @@ Queue_node* EM_get_oldest_record(execution_mgr* em, time_stamp* pp_time_out){
     Queue_node* cur = em->execution_q.head;
     Queue_node* old = em->execution_q.head;
     extern int MY_RANK_DEBUG;
+    proposal* r_next;
+    proposal* old_prop;
     while(cur){
         if(!cur->next)//end of queue
             break;
         assert(cur->data);
         assert(cur->next->data);
-        proposal* r_next = (proposal*)(cur->next->data);
 
-        if(((proposal*)(old->data))->time > r_next->time)// found older recorder
+        old_prop = proposal_decoder(old->data);
+
+        r_next = proposal_decoder(cur->next->data);
+
+        if(old_prop->time > r_next->time)// found older recorder
             old = cur->next;
-        else if(((proposal*)(old->data))->time == r_next->time){
-            if(((proposal*)(old->data))->pid > r_next->pid)//small pid wins
+        else if(old_prop->time == r_next->time){
+            if(old_prop->pid > r_next->pid)//small pid wins
                 old = cur->next;
         }
         cur = cur->next;
+        free(old_prop);
+        free(r_next);
     }
-
-    *pp_time_out = ((proposal*)(old->data))->time;
+    old_prop = proposal_decoder(old->data);
+    *pp_time_out = old_prop->time;
+    free(old_prop);
     //printf("%s:%d: rank = %d, node cnt = %d, oldest pid = %d, time = %lu\n",
     //        __func__, __LINE__, MY_RANK_DEBUG, em->execution_q.node_cnt,
     //       ((proposal*)(old->data))->pid, ((proposal*)(old->data))->time);
@@ -97,3 +105,10 @@ int EM_execute_all(execution_mgr* em){
     }
     return -1;
 }
+
+int EM_execute_cnt(execution_mgr *em)
+{
+    assert(em);
+    return em->execution_q.node_cnt;
+}
+

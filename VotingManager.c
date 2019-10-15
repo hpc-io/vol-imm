@@ -71,9 +71,9 @@ int VM_submit_bcast(voting_mgr* vm, proposal* p){
 //so it will not appear in the ledger, will need to add to ledger manually.
 int VM_check_my_proposal_state(voting_mgr* vm, proposal_id pid){
     assert(vm);
-    DEBUG_PRINT
+    //DEBUG_PRINT
     VM_voting_make_progress(vm);
-    DEBUG_PRINT
+    //DEBUG_PRINT
     int ret =  (vm->voting_plugin->vp_check_my_proposal_state)(vm->vp_context, pid);
     return ret;
     //DEBUG_PRINT

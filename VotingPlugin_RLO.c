@@ -38,7 +38,6 @@ int vp_submit_bcast_RLO(void* vp_ctx, proposal* proposal_in){//direct bcast, no 
 
     //proposal_test(proposal_in);
     void* proposal_buf = NULL;
-
     size_t prop_total_size = proposal_encoder(proposal_in, &proposal_buf);
     void* pbuf_buf = NULL;
     size_t pbuf_len = 0;
@@ -47,6 +46,7 @@ int vp_submit_bcast_RLO(void* vp_ctx, proposal* proposal_in){//direct bcast, no 
     DEBUG_PRINT
     RLO_bcast_gen(eng, bcast_msg, RLO_BCAST);
     DEBUG_PRINT
+    free(proposal_buf);
     return 0;
 }
 
@@ -58,8 +58,8 @@ int vp_submit_proposal_RLO(void* vp_ctx, proposal* proposal_in){
     void* proposal_buf = NULL;
 
     size_t prop_total_size = proposal_encoder(proposal_in, &proposal_buf);
-
-    //printf("%s:%u, test p_data len = %lu, prop_total_size = %lu, pid = %d\n", __func__, __LINE__, proposal_in->p_data_len, prop_total_size, proposal_in->pid);
+    //proposal_buf_test(proposal_buf);
+    //printf("%s:%u, proposal_encoder: p_data len = %lu, prop_total_size = %lu, pid = %d\n", __func__, __LINE__, proposal_in->p_data_len, prop_total_size, proposal_in->pid);
     return RLO_submit_proposal(eng, proposal_buf, prop_total_size, proposal_in->pid);
 }
 
@@ -114,7 +114,8 @@ int vp_checkout_proposal_RLO(void* vp_ctx, void** prop_buf){
 
         PBuf* b = NULL;//calloc(1, sizeof(PBuf));
         pbuf_deserialize(msg_out->data + sizeof(size_t), &b);
-        //printf("%s:%u, my_rank = %d, b.pid = %d, b.data_len = %lu, should be a proposal_buf size.\n",__func__, __LINE__, MY_RANK_DEBUG, b->pid, b->data_len);
+        //printf("%s:%u, my_rank = %d, b.pid = %d, pbuf.data_len = %lu, should be a proposal_buf size.\n",
+        //        __func__, __LINE__, MY_RANK_DEBUG, b->pid, b->data_len);
         *prop_buf = calloc(1, b->data_len);
 
         memcpy(*prop_buf, b->data, b->data_len);

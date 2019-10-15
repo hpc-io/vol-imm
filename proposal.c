@@ -21,7 +21,7 @@ time_stamp proposal_get_time_usec() {
 }
 
 proposal* compose_proposal(proposal_id pid, int op_type, void* p_data, size_t p_data_len){
-    proposal* p = calloc(1, sizeof(proposal) + p_data_len);
+    proposal* p = calloc(1, sizeof(proposal));
     p->pid = pid;
     p->state = PS_DEFAULT;
     p->time = proposal_get_time_usec();
@@ -29,24 +29,35 @@ proposal* compose_proposal(proposal_id pid, int op_type, void* p_data, size_t p_
     p->op_type = op_type;
     p->p_data_len = p_data_len;
     p->proposal_data = p_data;//calloc(1, p_data_len);
-    //memcpy(p->proposal_data, p_data, p_data_len);
     p->result_obj_local = NULL;
     //printf("%s:%d: test proposal_data len = %lu, data = %p\n", __func__, __LINE__, p->p_data_len, p->proposal_data);
     return p;
 }
 
-void proposal_test(proposal* p){
+void proposal_check(proposal* p){
     assert(p);
     printf("%s:%d: pid = %d, op_type = %d, isLocal = %d, state = %d, time =%lu, p_data_len = %lu, p_data = %p, result_obj_local = %p\n",
             __func__, __LINE__, p->pid, p->op_type, p->isLocal, p->state, p->time, p->p_data_len, p->proposal_data, p->result_obj_local);
-
 }
 
 size_t proposal_encoder(proposal* p, void**buf_out){
-    size_t total_size = sizeof(proposal) + p->p_data_len;
+    size_t cal_size = sizeof(proposal_id) +
+            sizeof(proposal_state) +
+            sizeof(time_stamp) +
+            sizeof(int) +
+            sizeof(int) +
+            sizeof(size_t) +
+            p->p_data_len;
+
     //printf("%s:%d: pid = %d\n", __func__, __LINE__, p->pid);
-    //printf("%s:%d: p->p_data_len = %lu, p_data = %p\n", __func__, __LINE__, p->p_data_len, p->proposal_data);
-    *buf_out = calloc(1, sizeof(proposal) + p->p_data_len);
+    //printf("%s:%d: p->state = %d\n", __func__, __LINE__, p->state);
+    //printf("%s:%d: p->time = %lu\n", __func__, __LINE__, p->time);
+    //printf("%s:%d: p->isLocal = %d\n", __func__, __LINE__, p->isLocal);
+    //printf("%s:%d: p->op_type = %d\n", __func__, __LINE__, p->op_type);
+    //printf("%s:%d: proposal_encoder: cal_size(total size) = %lu\n", __func__, __LINE__, cal_size);
+    //printf("%s:%d: proposal_encoder p->p_data_len = %lu\n", __func__, __LINE__, p->p_data_len);
+
+    *buf_out = calloc(1, cal_size);//sizeof(proposal) + p->p_data_len
 
     void* cur = *buf_out;
 
@@ -68,10 +79,11 @@ size_t proposal_encoder(proposal* p, void**buf_out){
     *(size_t*)cur = p->p_data_len;
     cur = (char*)cur + sizeof(size_t);
 
-    memcpy(cur, p->proposal_data, p->p_data_len);
-    //cur = (char*)cur + p->p_data_len;
-
-    return total_size;
+    if(p->p_data_len > 0) {
+        memcpy(cur, p->proposal_data, p->p_data_len);
+        //cur = (char*)cur + p->p_data_len;
+    }
+    return cal_size;
 }
 
 //This is called only when you have a proposal_buf
@@ -102,15 +114,25 @@ proposal* proposal_decoder(void* buf_in){
     buf_in = (char*)buf_in + sizeof(size_t);
     //printf("%s:%d: p->p_data_len = %lu\n", __func__, __LINE__, p->p_data_len);
 
-    p->proposal_data = calloc(1, p->p_data_len);
-    memcpy(p->proposal_data, buf_in, p->p_data_len);
-
-    buf_in = (char*)buf_in + p->p_data_len;
+    if(p->p_data_len > 0) {
+        p->proposal_data = calloc(1, p->p_data_len);
+        memcpy(p->proposal_data, buf_in, p->p_data_len);
+        buf_in = (char*)buf_in + p->p_data_len;
+    }
+    else
+        p->proposal_data = NULL;
 
     // a remote proposal won't carry a resulting obj, so it's safe to set to NULL.
     // This field should be assigned only when the proposal is to execute locally (then carry a resulting obj.)
     p->result_obj_local = NULL;
     return p;
+}
+
+void proposal_buf_test(void* buf_in){
+    proposal* p = proposal_decoder(buf_in);
+    printf("Checking proposal content: p->pid = %d, p->state = %d, p->time = %lu, p->isLocal = %d, p->op_type = %d, p->p_data_len = %lu\n",
+            p->pid, p->state, p->time, p->isLocal, p->op_type, p->p_data_len);
+    free(p);
 }
 
 time_stamp set_proposal_time(proposal* p){

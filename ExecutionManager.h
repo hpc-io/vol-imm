@@ -24,4 +24,6 @@ int EM_execution_manager_term(execution_mgr* em);
 int EM_add_proposal(execution_mgr* em, Queue_node* pp);
 int EM_execute(execution_mgr* em, void* proposal_buf);
 int EM_execute_all(execution_mgr* em);
+int EM_execute_cnt(execution_mgr *em);
+
 #endif /* EXECUTIONMANAGER_H_ */

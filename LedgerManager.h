@@ -27,5 +27,7 @@ int LM_add_ledger(ledger_mgr* lm, Queue_node* new_node);
 int LM_remove_ledger(ledger_mgr* lm, Queue_node* to_remove);
 Queue_node* LM_get_oldest_record(ledger_mgr* lm, time_stamp* pp_time_out);
 int LM_ledger_cnt(ledger_mgr* lm);
+int LM_iterate(ledger_mgr *lm, gen_queue_iter_cb cb, void *cb_ctx);
 
 #endif /* LEDGER_MANAGER_H_ */
+

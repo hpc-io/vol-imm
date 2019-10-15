@@ -67,13 +67,61 @@ void _checkout_proposal_make_progress(metadata_manager* mm){
     }
 }
 
+int
+MM_make_progress_cb(Queue_node *node, void *ctx)
+{
+    metadata_manager *mm = (metadata_manager *)ctx;
+    time_stamp prop_time = ((proposal*)(node->data))->time;
+    time_stamp now;
+
+    now = MM_get_time_stamp_us();
+    if((now - prop_time) > mm->time_window_size) {
+        LM_remove_ledger(mm->lm, node);
+        EM_add_proposal(mm->em, node);
+    }
+
+    return 0;
+}
+
+// Make progress through all queues, obeying time window "age out", but not
+// blocking
+int
+MM_make_progress(metadata_manager *mm)
+{
+    int q_cnt;;
+
+    assert(mm);
+
+    // Push things along in lower levels, possibly adding proposals to ledger
+    VM_voting_make_progress(mm->vm);
+    _checkout_proposal_make_progress(mm);
+
+    // Check for proposales in ledger, moving aged out ones to the
+    // execution queue (in the callback)
+    q_cnt = LM_ledger_cnt(mm->lm);
+    if(q_cnt > 0)
+        LM_iterate(mm->lm, MM_make_progress_cb, mm);
+
+    // Check for proposales to execute and if there are any, do so
+    // (EM_execute_all() does so in the correct time order)
+    q_cnt = EM_execute_cnt(mm->em);
+    if(q_cnt > 0)
+        EM_execute_all(mm->em);
+
+    return -1;
+}
+
+
 //Move every thing in the LQ to EQ and ensure time window.
-int MM_ledger_process(metadata_manager* mm){
+int MM_ledger_process(metadata_manager* mm)
+{
+    int ledger_cnt;
+
     assert(mm);
     VM_voting_make_progress(mm->vm);
     _checkout_proposal_make_progress(mm);
-    int ledger_cnt = LM_ledger_cnt(mm->lm);
-    while(ledger_cnt > 0){
+    ledger_cnt = LM_ledger_cnt(mm->lm);
+    while(ledger_cnt > 0) {
         time_stamp pp_time = 0;
 
         // printf("%s:%d: rank = %d, pid = %d, ledger_cnt = %d\n",
@@ -133,7 +181,7 @@ int MM_submit_proposal(metadata_manager* mm, proposal* p){
     int ret = -1;
     p->isLocal = 0;
     DEBUG_PRINT
-    if(mm->mode == 1){//rebular mode
+    if(mm->mode == 1){//regular mode
         DEBUG_PRINT
         //encoding proposal and send over network in this call.
         ret = VM_submit_proposal_for_voting(mm->vm, p);
@@ -160,10 +208,8 @@ int MM_submit_proposal(metadata_manager* mm, proposal* p){
                 _checkout_proposal_make_progress(mm);
                 //MM_ledger_process(mm);
             }
-            ret = 1;
-        } else {
-            ret = 0;
         }
+        DEBUG_PRINT
         MM_ledger_process(mm);
         //printf("%s:%d: my rank = %d Counting qs: ledg_cnt = %d, exe_cnt = %d, now = %lu\n",
         //        __func__, __LINE__, MY_RANK_DEBUG, mm->lm->ledger_q.node_cnt, mm->em->execution_q.node_cnt,
@@ -191,6 +237,7 @@ int MM_submit_proposal(metadata_manager* mm, proposal* p){
         Queue_node* my_node = gen_queue_node_new(local_prop_buf);
         LM_add_ledger(mm->lm, my_node);
         DEBUG_PRINT
+#ifdef OLD_WAY
         int lg_cnt = LM_ledger_cnt(mm->lm);
         while(lg_cnt < mm->world_size){
             VM_voting_make_progress(mm->vm);//make progress on RLO
@@ -207,6 +254,9 @@ int MM_submit_proposal(metadata_manager* mm, proposal* p){
         //put my proposal to ledger queue
         //wait until world_size - 1 msgs are checked out in ledger.
         //move to execution_q and execute all.
+#else /* OLD_WAY */
+        MM_make_progress(mm);
+#endif /* OLD_WAY */
         ret = 1;
     }
     DEBUG_PRINT
@@ -224,8 +274,6 @@ int MM_updata_helper_make_progress(metadata_manager* mm){
 
     return 0;
 }
-
-int get_my_verdict(metadata_manager* meta_eng){return -1;}
 
 time_stamp MM_get_time_stamp_us(){
     struct timeval tv;
