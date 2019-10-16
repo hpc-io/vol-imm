@@ -44,7 +44,7 @@ unsigned long dt_commit_test(int benchmark_type, const char* file_name, hid_t fa
         for(int i = 0; i < comm_size; i++){
             for(int j = 0; j < num_ops; j++){
                 sprintf(dt_name, "int_%d_%d", i, j);
-                printf("committing data type, my rank = %d, dt_name = [%s]\n", my_rank, dt_name);
+                //printf("committing data type, my rank = %d, dt_name = [%s]\n", my_rank, dt_name);
                 int_id = H5Tcopy(H5T_NATIVE_INT);
                 if(H5Tcommit2(file_id, dt_name, int_id, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT) < 0){
                     printf("H5Tcommit2 failed.\n");
@@ -55,7 +55,7 @@ unsigned long dt_commit_test(int benchmark_type, const char* file_name, hid_t fa
     } else {//RLO
         for(int j = 0; j < num_ops; j++){
             sprintf(dt_name, "int_%d_%d", my_rank, j);
-            printf("committing data type, dt_name = [%s]\n", dt_name);
+            //printf("committing data type, dt_name = [%s]\n", dt_name);
             int_id = H5Tcopy(H5T_NATIVE_INT);
             if(H5Tcommit2(file_id, dt_name, int_id, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT) < 0){
                 printf("H5Tcommit2 failed.\n");
@@ -99,12 +99,6 @@ unsigned long ds_test(int benchmark_type, const char* file_name, hid_t fapl, int
                 status = H5Dread(dataset_id, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT, dset_data);
                 status = H5Dclose(dataset_id);
             }
-
-            /* Open an existing dataset. */
-            //    status = H5Dread(dataset_id, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT, dset_data);
-            /* Close the dataset. */
-
-            DEBUG_PRINT
         }
     } else {//RLO
         for(int j = 0; j < num_ops; j++){
@@ -117,35 +111,24 @@ unsigned long ds_test(int benchmark_type, const char* file_name, hid_t fapl, int
         DEBUG_PRINT
     }
     unsigned long t2 = public_get_time_stamp_us();
-    /* Create the dataset. */
 
-
-    /* Terminate access to the data space. */
     status = H5Sclose(dataspace_id);
-    // printf("6: space closed.\n");
-    DEBUG_PRINT
 
-    /* Close the file. */
     status = H5Fclose(file_id);
-    DEBUG_PRINT
-    // printf("7: file closed.\n");
-
 
     /* Re-open the file in serial and verify contents created independently */
-//    file_id = H5Fopen(file_name, H5F_ACC_RDONLY, H5P_DEFAULT);
+    file_id = H5Fopen(file_name, H5F_ACC_RDONLY, H5P_DEFAULT);
 
-//    for(i = 0; i < comm_size; i++) {
-//        /* Open an existing dataset. */
-//        sprintf(ds_name, "/dset_%d", i);
-//        dataset_id = H5Dopen2(file_id, ds_name, H5P_DEFAULT);
-//    //    status = H5Dread(dataset_id, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT, dset_data);
-//        /* Close the dataset. */
-//        status = H5Dclose(dataset_id);
-//        DEBUG_PRINT
-//
-//    }
-    //printf("Dataset test completed. rank = %d\n", my_rank);
-//    H5Fclose(file_id);
+    for(i = 0; i < comm_size; i++) {
+        for(int j = 0; j < num_ops; j++){
+            sprintf(ds_name, "/dset_%d_%d", i, j);
+            dataset_id = H5Dopen2(file_id, ds_name, H5P_DEFAULT);
+            status = H5Dread(dataset_id, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT, dset_data);
+            status = H5Dclose(dataset_id);
+            DEBUG_PRINT
+        }
+    }
+    H5Fclose(file_id);
     return t2 - t1;
 }
 
@@ -180,21 +163,17 @@ unsigned long group_test(int benchmark_type, const char* file_name, hid_t fapl, 
     H5Fclose(file_id);
 
     /* Re-open the file in serial and verify contents created independently */
-    //file_id = H5Fopen(file_name, H5F_ACC_RDONLY, H5P_DEFAULT);
-    //printf("8\n");
+    file_id = H5Fopen(file_name, H5F_ACC_RDONLY, H5P_DEFAULT);
 
-//    for(int i = 0; i < comm_size; i++) {
-//        //printf("9\n");
-//        sprintf(group_name, "/group_%d", i);
-//        group_id = H5Gopen2(file_id, group_name, H5P_DEFAULT);
-//
-//        status = H5Gclose(group_id);
-//        //printf("11\n");
-//        DEBUG_PRINT
-////    printf("13\n");
-//    }
-    //H5Fclose(file_id);
-    //printf("Group test completed. rank = %d\n", my_rank);
+    for(int i = 0; i < comm_size; i++) {
+        for(int j = 0; j < num_ops; j++){
+            sprintf(group_name, "/group_%d_%d", i, j);
+            group_id = H5Gopen2(file_id, group_name, H5P_DEFAULT);
+            status = H5Gclose(group_id);
+            DEBUG_PRINT
+        }
+    }
+    H5Fclose(file_id);
     return t2 - t1;
 }
 
@@ -205,24 +184,19 @@ unsigned long attr_test(int benchmark_type, const char* file_name, hid_t fapl, i
     herr_t      status;
     char ds_name[32] = "";
     char attr_name[32] = "";
-    /* Initialize the attribute data. */
-//    attr_data[0] = 100;
-//    attr_data[1] = 200;
     dims = 1;
+
     int* attr_data_array = calloc(comm_size, sizeof(int));
     for(int i = 0; i < comm_size; i++){
         attr_data_array[i] = i;
-        //printf("%s:%d: attr_data_attr[%d] = %d\n", __func__, __LINE__, i, attr_data_array[i]);
     }
 
-    /* Create a file. */
     file_id = H5Fcreate(file_name, H5F_ACC_TRUNC, H5P_DEFAULT, fapl);
-
 
     dataspace_id = H5Screate_simple(1, &dims, NULL);
 
-    /* Create a dataset. */
     unsigned long t1 = public_get_time_stamp_us();
+
     if(benchmark_type == 0){//baseline
         for(int i = 0; i < comm_size; i++) {
             for(int j = 0; j < num_ops; j++){
@@ -239,49 +213,27 @@ unsigned long attr_test(int benchmark_type, const char* file_name, hid_t fapl, i
 
                 status = H5Aclose(attribute_id);
 
-                /* Close to the dataset. */
                 status = H5Dclose(dataset_id);
-                //printf("%s:%u, rank = %d dataset closed. \n", __func__, __LINE__, my_rank);
-                /* Close the file. */
             }
         }
-
-
     } else {//RLO
         for(int j = 0; j < num_ops; j++){
             sprintf(ds_name, "/dset_%d_%d", my_rank, j);
             dataset_id = H5Dcreate2(file_id, ds_name, H5T_NATIVE_INT, dataspace_id,
                                    H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
 
-            //printf("%s:%u, rank = %d Dataset created. ds_name = [%s]\n", __func__, __LINE__, my_rank, ds_name);
-            /* Create the data space for the attribute. */
-            dims = 1;
-
-            /* Create a dataset attribute. */
             sprintf(attr_name, "/attr_%d_%d", my_rank, j);
             attribute_id = H5Acreate2 (dataset_id, attr_name, H5T_NATIVE_INT, dataspace_id,
                                       H5P_DEFAULT, H5P_DEFAULT);
-            //printf("%s:%u, rank = %d Attribute created. attr_name = [%s]\n", __func__, __LINE__, my_rank, attr_name);
-            //printf("%s:%d: listing H5Awrite data: my_rank = %d, attr_data_array[my_rank] = %d\n",
-            //        __func__, __LINE__, my_rank, attr_data_array[my_rank]);
-            /* Write the attribute data. */
+
             status = H5Awrite(attribute_id, H5T_NATIVE_INT, &(attr_data_array[my_rank]));
-            //printf("%s:%u, rank = %d Attribute write complete. \n", __func__, __LINE__, my_rank);
-            /* Close the attribute. */
             status = H5Aclose(attribute_id);
-            //printf("%s:%u, rank = %d Attribute closed. \n", __func__, __LINE__, my_rank);
-            /* Close the dataspace. */
-
-            /* Close to the dataset. */
             status = H5Dclose(dataset_id);
-            //printf("%s:%u, rank = %d dataset closed. \n", __func__, __LINE__, my_rank);
         }
-
     }
     unsigned long t2 = public_get_time_stamp_us();
     status = H5Sclose(dataspace_id);
     status = H5Fclose(file_id);
-    //printf("Attribute test completed. rank = %d\n", my_rank);
     return t2 - t1;
 }
 
@@ -297,9 +249,9 @@ int dset_extend_test(int benchmark_type, const char* file_name, hid_t fapl)
     int         i, j;
     int dset_data[4][6];
     hsize_t     new_size[2];
-    DEBUG_PRINT
+
     hid_t file_id = H5Fcreate(file_name, H5F_ACC_TRUNC, H5P_DEFAULT, fapl);
-    DEBUG_PRINT
+
     unsigned long t1 = 0;
     unsigned long t2 = 0;
     /* Create an unlimited dataspace for the dataset. */
@@ -314,52 +266,39 @@ int dset_extend_test(int benchmark_type, const char* file_name, hid_t fapl)
     chunk_dims[0] = 10;
     chunk_dims[1] = 10;
     status = H5Pset_chunk(dcpl_id, 2, chunk_dims);
-    DEBUG_PRINT
-
-    /* Create chunked datasets independently */
-    DEBUG_PRINT
 
     if(benchmark_type == 0){
-         //file_id = H5Fcreate(file_name, H5F_ACC_TRUNC, H5P_DEFAULT, fapl);
+        H5Fcreate(file_name, H5F_ACC_TRUNC, H5P_DEFAULT, fapl);
         for(int i = 0; i< comm_size; i++){
             sprintf(ds_name, "/dset_%d", i);
-            printf("Dcreate: ds_name = %s\n", ds_name);
             dataset_id = H5Dcreate2(file_id, ds_name, H5T_NATIVE_INT, dataspace_id,
                                    H5P_DEFAULT, dcpl_id, H5P_DEFAULT);
             status = H5Dclose(dataset_id);
-
         }
 
         H5Fclose(file_id);
 
-        DEBUG_PRINT
-        /* Re-open the file and extend the datasets */
         file_id = H5Fopen(file_name, H5F_ACC_RDWR, fapl);
-        DEBUG_PRINT
-        /* Open an existing dataset. */
+
         for(int j = 0; j < comm_size; j++){
             sprintf(ds_name, "/dset_%d", j);
-            DEBUG_PRINT
-            printf("2nd Dopen: ds_name = %s, my rank = %d\n", ds_name, my_rank);
+            //printf("2nd Dopen: ds_name = %s, my rank = %d\n", ds_name, my_rank);
             dataset_id = H5Dopen2(file_id, ds_name, H5P_DEFAULT);
-            DEBUG_PRINT
+
             t1 = public_get_time_stamp_us();
             /* Extend each dataset to different sizes for each rank */
             new_size[0] = 40 * (j + 2); /* rank 0 = 80, rank 1 = 120, etc. */
             new_size[1] = 60;
-            DEBUG_PRINT
+
             status = H5Dset_extent(dataset_id, new_size);
-            DEBUG_PRINT
+
             t2 = public_get_time_stamp_us();
-            /* Close the dataset. */
+
             status = H5Dclose(dataset_id);
-            DEBUG_PRINT
         }
 
-        DEBUG_PRINT
         H5Fclose(file_id);
 
-        DEBUG_PRINT
         /* Re-open the file in serial and verify contents created independently */
         file_id = H5Fopen(file_name, H5F_ACC_RDONLY, H5P_DEFAULT);
 
@@ -367,10 +306,6 @@ int dset_extend_test(int benchmark_type, const char* file_name, hid_t fapl)
             /* Open an existing dataset. */
             sprintf(ds_name, "/dset_%d", i);
             dataset_id = H5Dopen2(file_id, ds_name, H5P_DEFAULT);
-
-        //    status = H5Dread(dataset_id, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT, dset_data);
-
-            /* Close the dataset. */
             status = H5Dclose(dataset_id);
             DEBUG_PRINT
         }
@@ -378,19 +313,12 @@ int dset_extend_test(int benchmark_type, const char* file_name, hid_t fapl)
         H5Fclose(file_id);
         DEBUG_PRINT
     } else {//RLO
-        DEBUG_PRINT
-         //hid_t file_id = H5Fcreate(file_name, H5F_ACC_TRUNC, H5P_DEFAULT, fapl);
-         DEBUG_PRINT
-
          /* Create an unlimited dataspace for the dataset. */
          dims[0] = 40;
          dims[1] = 60;
          max_dims[0] = H5S_UNLIMITED;
          max_dims[1] = 60;
-         //dataspace_id = H5Screate_simple(2, dims, max_dims);
 
-         /* Set up chunked dataset creation parameters */
-         //dcpl_id = H5Pcreate(H5P_DATASET_CREATE);
          chunk_dims[0] = 10;
          chunk_dims[1] = 10;
          status = H5Pset_chunk(dcpl_id, 2, chunk_dims);
@@ -401,23 +329,11 @@ int dset_extend_test(int benchmark_type, const char* file_name, hid_t fapl)
          sprintf(ds_name, "/dset_%d", my_rank);
          dataset_id = H5Dcreate2(file_id, ds_name, H5T_NATIVE_INT, dataspace_id,
                                 H5P_DEFAULT, dcpl_id, H5P_DEFAULT);
-         DEBUG_PRINT
-
-         //    /* Write the dataset. */
-         //    status = H5Dwrite(dataset_id, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT, dset_data);
-         //    printf("10\n");
 
          /* End access to the dataset and release resources used by it. */
          status = H5Dclose(dataset_id);
-         DEBUG_PRINT
 
-         /* Terminate access to the data space. */
-
-         DEBUG_PRINT
-
-         /* Close the file. */
          status = H5Fclose(file_id);
-         DEBUG_PRINT
 
          /* Re-open the file and extend the datasets */
          file_id = H5Fopen(file_name, H5F_ACC_RDWR, fapl);
@@ -427,36 +343,26 @@ int dset_extend_test(int benchmark_type, const char* file_name, hid_t fapl)
          dataset_id = H5Dopen2(file_id, ds_name, H5P_DEFAULT);
 
          /* Extend each dataset to different sizes for each rank */
-         new_size[0] = 40 * (my_rank + 2); /* rank 0 = 80, rank 1 = 120, etc. */
+         new_size[0] = 40 * (my_rank + 2);
          new_size[1] = 60;
+         t1 = public_get_time_stamp_us();
          status = H5Dset_extent(dataset_id, new_size);
-         DEBUG_PRINT
-
-         /* Close the dataset. */
+         t2 = public_get_time_stamp_us();
          status = H5Dclose(dataset_id);
-         DEBUG_PRINT
 
          H5Fclose(file_id);
 
-         /* Re-open the file in serial and verify contents created independently */
          file_id = H5Fopen(file_name, H5F_ACC_RDONLY, H5P_DEFAULT);
 
          for(i = 0; i < comm_size; i++) {
-             /* Open an existing dataset. */
              sprintf(ds_name, "/dset_%d", i);
              dataset_id = H5Dopen2(file_id, ds_name, H5P_DEFAULT);
-
-         //    status = H5Dread(dataset_id, H5T_NATIVE_INT, H5S_ALL, H5S_ALL, H5P_DEFAULT, dset_data);
-
-             /* Close the dataset. */
              status = H5Dclose(dataset_id);
              DEBUG_PRINT
          }
          status = H5Sclose(dataspace_id);
          H5Fclose(file_id);
     }
-
-
     return t2 - t1;
 }
 
@@ -478,7 +384,7 @@ int main(int argc, char* argv[])
         benchmark_type = atoi(argv[1]);
         time_window = atoi(argv[2]);
         int sleep_time = atoi(argv[3]);
-        //printf("Waiting %d sec for gdb to attach....pid = %d\n", sleep_time, getpid());
+
         sleep(sleep_time);
     } else if(argc == 3){
         //set to use RLO VOL
@@ -488,8 +394,7 @@ int main(int argc, char* argv[])
         //set to use RLO VOL
         benchmark_type = atoi(argv[1]);
         time_window = 10*1000;
-    } else {
-        //use RLO VOL
+    } else {        //use RLO VOL
         time_window = 10*1000;
     }
     //printf("1.2, time_window = %lu\n", time_window);
@@ -522,7 +427,6 @@ int main(int argc, char* argv[])
         rlo_vol_info.mode = benchmark_type;
         rlo_vol_info.world_size = comm_size;
         rlo_vol_info.my_rank = my_rank;
-        //printf("%s:%d:mode = %d, world_size = %lu, window size =  %d\n", __func__, __LINE__, benchmark_type, comm_size, time_window);
         H5Pset_vol(fapl, rlo_vol_id, &rlo_vol_info);
         //printf("1.6\n");
 
@@ -532,24 +436,23 @@ int main(int argc, char* argv[])
     int num_ops = 1;
     //========================  Sub Test cases  ======================
     unsigned long t;
-    //t = ds_test(benchmark_type, file_name, fapl, num_ops);
-    //printf("HDF5 RLO VOL test done. ds_test take %lu usec, avg = %lu\n", t, (t / num_ops));
+    t = ds_test(benchmark_type, file_name, fapl, num_ops);
+    printf("HDF5 RLO VOL test done. ds_test take %lu usec, avg = %lu\n", t, (t / num_ops));
 
-    //t = group_test(benchmark_type, file_name, fapl, num_ops);
-    //printf("HDF5 RLO VOL test done. group_test took %lu usec, avg = %lu\n", t, (t / num_ops));
+    t = group_test(benchmark_type, file_name, fapl, num_ops);
+    printf("HDF5 RLO VOL test done. group_test took %lu usec, avg = %lu\n", t, (t / num_ops));
 
-    //t = attr_test(benchmark_type, file_name, fapl, num_ops);
-    //printf("HDF5 RLO VOL test done. attr_test took %lu usec,  avg = %lu\n\n\n\n", t, (t / num_ops));
-
+    t = attr_test(benchmark_type, file_name, fapl, num_ops);
+    printf("HDF5 RLO VOL test done. attr_test took %lu usec,  avg = %lu\n", t, (t / num_ops));
 
     t= dset_extend_test(benchmark_type, file_name, fapl);
     printf("HDF5 RLO VOL test done. dset_extend_test took %lu usec,  avg = %lu\n", t, t);
 
-    //t = dt_commit_test(benchmark_type, file_name, fapl, num_ops);
-    //printf("HDF5 RLO VOL test done. dt_commit_test took %lu usec,  avg = %lu\n", t, (t / num_ops));
+    t = dt_commit_test(benchmark_type, file_name, fapl, num_ops);
+    printf("HDF5 RLO VOL test done. dt_commit_test took %lu usec,  avg = %lu\n", t, (t / num_ops));
     //=================================================================
     H5Pclose(fapl);
-    //printf("2.5\n");
+
     H5close();
     //rintf("HDF5 library shut down.\n");
 
