@@ -234,6 +234,10 @@ static herr_t H5VL_rlo_pass_through_request_specific(void *req, H5VL_request_spe
 static herr_t H5VL_rlo_pass_through_request_optional(void *req, va_list arguments);
 static herr_t H5VL_rlo_pass_through_request_free(void *req);
 
+/* Blob callbacks */
+static herr_t H5VL_rlo_pass_through_blob_put(void *obj, const void *buf, size_t size, void *blob_id, void *ctx);
+static herr_t H5VL_rlo_pass_through_blob_get(void *obj, const void *blob_id, void *buf, size_t *size, void *ctx);
+static herr_t H5VL_rlo_pass_through_blob_specific(void *obj, void *blob_id, H5VL_blob_specific_t specific_type, va_list arguments);
 /*******************/
 /* Local variables */
 /*******************/
@@ -327,6 +331,12 @@ const H5VL_class_t H5VL_rlo_pass_through_g = {
         H5VL_rlo_pass_through_request_specific,         /* specific */
         H5VL_rlo_pass_through_request_optional,         /* optional */
         H5VL_rlo_pass_through_request_free              /* free */
+    },
+    {                                           /* blob_cls */
+        H5VL_rlo_pass_through_blob_put,                 /* put */
+        H5VL_rlo_pass_through_blob_get,                 /* get */
+        H5VL_rlo_pass_through_blob_specific,            /* specific */
+        NULL                                        /* optional */
     },
     NULL                                        /* optional */
 };
@@ -1252,7 +1262,6 @@ herr_t attr_get(void* obj, hid_t vol_id, H5VL_attr_get_t get_type,
 char* attr_get_name(void* under_vol_obj, hid_t vol_id){
     H5VL_loc_params_t   loc_params;
     loc_params.type = H5VL_OBJECT_BY_SELF;
-    hid_t attr_id;
 
     loc_params.obj_type = H5I_ATTR;
 
@@ -1388,13 +1397,13 @@ int loc_param_test(H5VL_loc_params_t* param_in){
         case H5VL_OBJECT_BY_IDX:
             printf("%s:%d: H5VL_OBJECT_BY_IDX: name = [%s], skipped other fields.\n", __func__, __LINE__, param_in->loc_data.loc_by_idx.name);
             break;
-        case H5VL_OBJECT_BY_ADDR:
-            printf("%s:%d: H5VL_OBJECT_BY_ADDR: addr = %lu \n", __func__, __LINE__, param_in->loc_data.loc_by_addr.addr);
-            break;
-        case H5VL_OBJECT_BY_REF:
-            printf("%s:%d: H5VL_OBJECT_BY_REF \n", __func__, __LINE__);
-
-            break;
+//        case H5VL_OBJECT_BY_ADDR:
+//            printf("%s:%d: H5VL_OBJECT_BY_ADDR: addr = %lu \n", __func__, __LINE__, param_in->loc_data.loc_by_addr.addr);
+//            break;
+//        case H5VL_OBJECT_BY_REF:
+//            printf("%s:%d: H5VL_OBJECT_BY_REF \n", __func__, __LINE__);
+//
+//            break;
         case H5VL_OBJECT_BY_NAME:
             printf("%s:%d: H5VL_OBJECT_BY_NAME \n", __func__, __LINE__);
             break;
@@ -1459,18 +1468,19 @@ int loc_params_encoder(H5VL_loc_params_t* param_in, void** param_pack_out){
             free(pl_buf);
             break;
 
-        case H5VL_OBJECT_BY_ADDR:
-            union_size = sizeof(haddr_t);
+        case H5VL_OBJECT_BY_TOKEN:
+            union_size = sizeof(H5VL_token_t);//or H5VL_loc_by_token_t??
             buf_union = calloc(1, union_size);
             buf_cur = buf_union;
-            *((haddr_t*)buf_cur) = param_in->loc_data.loc_by_addr.addr;
-            buf_cur = ((char *)buf_cur) + sizeof(haddr_t);
+            //*((haddr_t*)buf_cur) = param_in->loc_data.loc_by_token.token;
+            memcpy(buf_cur, param_in->loc_data.loc_by_token.token, sizeof(H5VL_token_t));
+            buf_cur = ((char *)buf_cur) + sizeof(H5VL_token_t);
             break;
 
-        case H5VL_OBJECT_BY_REF:
-            printf("%s:%d: H5VL_OBJECT_BY_REF loc type = %d\n", __func__, __LINE__, param_in->type);
-            assert(0 && "H5VL_OBJECT_BY_REF Not currently supported");
-            break;
+//        case H5VL_OBJECT_BY_REF:
+//            printf("%s:%d: H5VL_OBJECT_BY_REF loc type = %d\n", __func__, __LINE__, param_in->type);
+//            assert(0 && "H5VL_OBJECT_BY_REF Not currently supported");
+//            break;
 
         case H5VL_OBJECT_BY_NAME:
             pl_size = 0;
@@ -1555,14 +1565,15 @@ int loc_params_decoder(void* param_pack_in, H5VL_loc_params_t** param_out){
             cur->loc_data.loc_by_idx.lapl_id = H5Pdecode(param_pack_in);
             break;
 
-        case H5VL_OBJECT_BY_ADDR:
-            cur->loc_data.loc_by_addr.addr = *(haddr_t*)param_pack_in;
-            param_pack_in = (char*)param_pack_in + sizeof(haddr_t);
+        case H5VL_OBJECT_BY_TOKEN:
+            cur->loc_data.loc_by_token.token = calloc(1, sizeof(H5VL_token_t));
+            memcpy(cur->loc_data.loc_by_token.token, param_pack_in, sizeof(H5VL_token_t));
+            param_pack_in = (char*)param_pack_in + sizeof(H5VL_token_t);
             break;
-
-        case H5VL_OBJECT_BY_REF:
-            assert(0 && "Not currently supported");
-            break;
+//
+//        case H5VL_OBJECT_BY_REF:
+//            assert(0 && "Not currently supported");
+//            break;
 
         case H5VL_OBJECT_BY_NAME:
             pl_size = *(size_t*)param_pack_in;
@@ -1623,8 +1634,8 @@ int _attr_write_cb_sub(prop_ctx *execute_ctx, proposal* proposal) {
     //search local under_object by obj_id
     void* under_object_local;
     H5VL_loc_params_t under_loc_params;
-    under_loc_params.type = H5VL_OBJECT_BY_ADDR;
-    under_loc_params.loc_data.loc_by_addr.addr = param->parent_obj_addr;
+    under_loc_params.type = H5VL_OBJECT_BY_TOKEN;
+    under_loc_params.loc_data.loc_by_token.token = &(param->parent_obj_addr);
     under_loc_params.obj_type = H5I_FILE;//still file ????
     DEBUG_PRINT
 
@@ -1724,8 +1735,8 @@ int _dt_commit_cb_sub(prop_ctx *execute_ctx, proposal* proposal){
         //DEBUG_PRINT
         H5VL_loc_params_t under_loc_params;
         under_loc_params.obj_type = H5I_FILE;//H5I_GROUP;
-        under_loc_params.type = H5VL_OBJECT_BY_ADDR;
-        under_loc_params.loc_data.loc_by_addr.addr = param->parent_obj_addr;
+        under_loc_params.type = H5VL_OBJECT_BY_TOKEN;
+        under_loc_params.loc_data.loc_by_token.token = &(param->parent_obj_addr);
         H5I_type_t opened_type = 0;
         under_object_local = H5VLobject_open(execute_ctx->under_file, &under_loc_params,
                 execute_ctx->under_vol_id,
@@ -1785,8 +1796,8 @@ int _attr_create_cb_sub(prop_ctx *execute_ctx, proposal* proposal) {
     //search local under_object by obj_id
     void* under_object_local;
     H5VL_loc_params_t under_loc_params;
-    under_loc_params.type = H5VL_OBJECT_BY_ADDR;
-    under_loc_params.loc_data.loc_by_addr.addr = param->parent_obj_addr;
+    under_loc_params.type = H5VL_OBJECT_BY_TOKEN;
+    under_loc_params.loc_data.loc_by_token.token = &(param->parent_obj_addr);
     under_loc_params.obj_type = H5I_FILE;
     DEBUG_PRINT
 
@@ -1866,8 +1877,8 @@ int _ds_create_cb_sub(prop_ctx *execute_ctx, proposal* proposal) {
         //DEBUG_PRINT
         H5VL_loc_params_t under_loc_params;
         under_loc_params.obj_type = H5I_FILE;//H5I_GROUP;
-        under_loc_params.type = H5VL_OBJECT_BY_ADDR;
-        under_loc_params.loc_data.loc_by_addr.addr = param->parent_obj_addr;
+        under_loc_params.type = H5VL_OBJECT_BY_TOKEN;
+        under_loc_params.loc_data.loc_by_token.token = &(param->parent_obj_addr);
         H5I_type_t opened_type = 0;
         under_object_local = H5VLobject_open(execute_ctx->under_file, &under_loc_params,
                 execute_ctx->under_vol_id,
@@ -1933,8 +1944,8 @@ int _ds_extend_cb_sub(prop_ctx *execute_ctx, proposal* proposal)
         H5VLpush_lib_state();
 
         under_loc_params.obj_type = H5I_FILE;
-        under_loc_params.type = H5VL_OBJECT_BY_ADDR;
-        under_loc_params.loc_data.loc_by_addr.addr = param->dset_addr;
+        under_loc_params.type = H5VL_OBJECT_BY_TOKEN;
+        under_loc_params.loc_data.loc_by_token.token = &(param->dset_addr);
         under_object_local = H5VLobject_open(execute_ctx->under_file, &under_loc_params,
                 execute_ctx->under_vol_id,
                 &opened_type, //output: opened type
@@ -1982,8 +1993,8 @@ int _group_create_cb_sub(prop_ctx* execute_ctx, proposal* proposal){
 
         H5VL_loc_params_t under_loc_params;
         under_loc_params.obj_type = H5I_FILE;//H5I_GROUP;
-        under_loc_params.type = H5VL_OBJECT_BY_ADDR;
-        under_loc_params.loc_data.loc_by_addr.addr = param->parent_obj_addr;
+        under_loc_params.type = H5VL_OBJECT_BY_TOKEN;
+        under_loc_params.loc_data.loc_by_token.token = &(param->parent_obj_addr);
         H5I_type_t opened_type = 0;
         under_object_local = H5VLobject_open(execute_ctx->under_file, &under_loc_params,
                 execute_ctx->under_vol_id,
@@ -3576,7 +3587,6 @@ H5VL_rlo_pass_through_datatype_commit(void *obj, const H5VL_loc_params_t *loc_pa
 {
     H5VL_rlo_pass_through_t *dt;
     H5VL_rlo_pass_through_t *o = (H5VL_rlo_pass_through_t *)obj;
-    void *under;
 
 #ifdef ENABLE_RLO_PASSTHRU_LOGGING
     printf("------- PASS THROUGH VOL DATATYPE Commit\n");
@@ -4383,6 +4393,7 @@ H5VL_rlo_pass_through_group_close(void *grp, hid_t dxpl_id, void **req)
     if(o->p_ctx->is_collective){//call rlo_vol, otherwise use regular ones.
         //look at file_close.
         //do this for ds_close, typeclose too
+        ret_value = -1;
     } else {
         ret_value = H5VLgroup_close(o->under_object, o->p_ctx->under_vol_id, dxpl_id, req);
     }
@@ -5105,3 +5116,81 @@ H5VL_rlo_pass_through_request_free(void *obj)
     return ret_value;
 } /* end H5VL_rlo_pass_through_request_free() */
 
+/*-------------------------------------------------------------------------
+ * Function:    H5VL_pass_through_blob_put
+ *
+ * Purpose:     Handles the blob 'put' callback
+ *
+ * Return:      SUCCEED / FAIL
+ *
+ *-------------------------------------------------------------------------
+ */
+herr_t
+H5VL_rlo_pass_through_blob_put(void *obj, const void *buf, size_t size,
+    void *blob_id, void *ctx)
+{
+    H5VL_rlo_pass_through_t *o = (H5VL_rlo_pass_through_t *)obj;
+    herr_t ret_value;
+
+#ifdef ENABLE_PASSTHRU_LOGGING
+    printf("------- PASS THROUGH VOL BLOB Put\n");
+#endif
+
+    ret_value = H5VLblob_put(o->under_object, o->p_ctx->under_vol_id, buf, size,
+        blob_id, ctx);
+
+    return ret_value;
+} /* end H5VL_pass_through_blob_put() */
+
+
+/*-------------------------------------------------------------------------
+ * Function:    H5VL_pass_through_blob_get
+ *
+ * Purpose:     Handles the blob 'get' callback
+ *
+ * Return:      SUCCEED / FAIL
+ *
+ *-------------------------------------------------------------------------
+ */
+herr_t
+H5VL_rlo_pass_through_blob_get(void *obj, const void *blob_id, void *buf,
+    size_t *size, void *ctx)
+{
+    H5VL_rlo_pass_through_t *o = (H5VL_rlo_pass_through_t *)obj;
+    herr_t ret_value;
+
+#ifdef ENABLE_PASSTHRU_LOGGING
+    printf("------- PASS THROUGH VOL BLOB Get\n");
+#endif
+
+    ret_value = H5VLblob_get(o->under_object, o->p_ctx->under_vol_id, blob_id, buf,
+        size, ctx);
+
+    return ret_value;
+} /* end H5VL_pass_through_blob_get() */
+
+/*-------------------------------------------------------------------------
+ * Function:    H5VL_pass_through_blob_specific
+ *
+ * Purpose:     Handles the blob 'specific' callback
+ *
+ * Return:      SUCCEED / FAIL
+ *
+ *-------------------------------------------------------------------------
+ */
+herr_t
+H5VL_rlo_pass_through_blob_specific(void *obj, void *blob_id,
+    H5VL_blob_specific_t specific_type, va_list arguments)
+{
+    H5VL_rlo_pass_through_t *o = (H5VL_rlo_pass_through_t *)obj;
+    herr_t ret_value;
+
+#ifdef ENABLE_PASSTHRU_LOGGING
+    printf("------- PASS THROUGH VOL BLOB Specific\n");
+#endif
+
+    ret_value = H5VLblob_specific(o->under_object, o->p_ctx->under_vol_id, blob_id,
+        specific_type, arguments);
+
+    return ret_value;
+} /* end H5VL_pass_through_blob_specific() */
